@@ -95,6 +95,23 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 .styles button[aria-pressed="true"]{border-color:var(--amber);color:var(--amber)}
 .styles button .sc{margin-left:6px;opacity:.7;font-variant-numeric:tabular-nums}
 .icon-btn.back svg{stroke-width:2.2}
+.styles{flex-wrap:nowrap;overflow-x:auto;justify-content:flex-start;padding-bottom:2px;scrollbar-width:none}
+.styles::-webkit-scrollbar{display:none}
+.styles button{flex:none}
+.thumb-btn{border:0;background:var(--panel);border-radius:12px;padding:0;width:50px;height:50px;overflow:hidden;justify-self:start;display:grid;place-items:center;font:500 11px var(--f-mono);color:var(--muted)}
+.thumb-btn img{width:100%;height:100%;object-fit:cover;display:block}
+.cam-ctrl{position:absolute;left:0;right:0;bottom:12px;display:flex;justify-content:center;gap:8px;align-items:center;flex-wrap:wrap;pointer-events:none;padding:0 12px}
+.cam-ctrl>*{pointer-events:auto}
+.pill{border:0;background:rgba(13,14,12,.72);color:var(--fg);font:500 12px var(--f-mono);padding:8px 12px;border-radius:999px}
+.zooms{display:flex;gap:2px;background:rgba(13,14,12,.62);border-radius:999px;padding:3px}
+.zooms button{border:0;background:none;color:var(--fg);font:500 12px var(--f-mono);padding:6px 9px;border-radius:999px}
+.zooms button[aria-pressed="true"]{background:var(--raise);color:var(--amber)}
+#result{z-index:12} #settings{z-index:13}
+.gal-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;overflow-y:auto;align-content:start;min-height:0}
+.gal-grid button{border:0;padding:0;aspect-ratio:1;background:var(--panel);border-radius:6px;overflow:hidden}
+.gal-grid img{width:100%;height:100%;object-fit:cover;display:block}
+.gal-empty{grid-column:1/-1;color:var(--muted);text-align:center;padding:40px 12px;margin:0}
+.res-actions{display:flex;gap:8px;flex-wrap:wrap}
 </style>
 
 <div id="app">
@@ -116,6 +133,10 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
     <canvas id="ov"></canvas>
     <div id="chip" class="chip" hidden><b></b><span></span></div>
     <div id="scan" class="scan" hidden></div>
+    <div class="cam-ctrl" id="camCtrl" hidden>
+      <button class="pill" id="btnLens" hidden>Lente</button>
+      <div class="zooms" id="zooms" role="group" aria-label="Zoom da câmara" hidden></div>
+    </div>
     <div id="intro" class="intro">
       <div class="intro-card">
         <h1>Lê a cena inteira e propõe <span>o enquadramento mais forte.</span></h1>
@@ -127,7 +148,8 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
         </ol>
         <div class="row">
           <button class="btn primary" id="btnLive">Câmara ao vivo</button>
-          <label class="btn file-btn" for="file">Usar uma foto</label>
+          <label class="btn file-btn" for="file">Editar uma foto</label>
+          <button class="btn" id="btnGalIntro">Galeria</button>
         </div>
         <p class="note" id="engineNote">A verificar o motor de IA…</p>
       </div>
@@ -139,6 +161,10 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
       <button data-s="tercos" aria-pressed="true">Terços</button>
       <button data-s="simetrico" aria-pressed="false">Simétrico</button>
       <button data-s="minimal" aria-pressed="false">Minimal</button>
+      <button data-s="aurea" aria-pressed="false">Áurea</button>
+      <button data-s="diagonal" aria-pressed="false">Diagonal</button>
+      <button data-s="centro" aria-pressed="false">Centro</button>
+      <button data-s="moldura" aria-pressed="false">Moldura</button>
     </div>
     <p class="msg" id="msg">Escolhe um modo para começar.</p>
     <p class="tip" id="tip"></p>
@@ -148,8 +174,7 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
       <span id="rTrack">seguimento —</span>
     </div>
     <div class="controls">
-      <label class="ghost file-btn" id="lblPhoto" for="file" hidden>Foto</label>
-      <button class="ghost" id="btnMode" disabled>Ao vivo</button>
+      <button class="thumb-btn" id="btnGallery" aria-label="Galeria da app" hidden><img id="galThumb" alt="" hidden><span id="galThumbTxt">Galeria</span></button>
       <button class="shutter" id="shutter" aria-label="Disparar"></button>
       <button class="ghost" id="btnAnalyze" disabled>Reanalisar</button>
     </div>
@@ -166,7 +191,17 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
     <div class="opt-row" id="filters"></div>
     <div class="label">Moldura</div>
     <div class="opt-row" id="borders"></div>
+    <div class="res-actions">
+      <button class="btn" id="btnShare" hidden>Partilhar</button>
+      <button class="btn" id="btnDel">Apagar da galeria</button>
+    </div>
   </div>
+</div>
+
+<div class="sheet" id="gallery" hidden>
+  <header><h2>Galeria</h2><div class="row"><label class="btn file-btn" for="file">Importar</label><button class="btn" id="btnGalClose">Fechar</button></div></header>
+  <div class="gal-grid" id="galGrid"></div>
+  <p class="note">As fotos ficam guardadas só neste browser. Para as teres na galeria do telemóvel, abre uma e carrega em Guardar.</p>
 </div>
 
 <div class="sheet" id="settings" hidden>
@@ -207,8 +242,8 @@ const store = {
   set(k,v){ try{ localStorage.setItem("enquadra."+k, JSON.stringify(v)); }catch{} }
 };
 
-const STYLE_IDS=["tercos","simetrico","minimal"];
-const STYLE_LABEL={tercos:"Terços",simetrico:"Simétrico",minimal:"Minimal"};
+const STYLE_IDS=["tercos","simetrico","minimal","aurea","diagonal","centro","moldura"];
+const STYLE_LABEL={tercos:"Terços",simetrico:"Simétrico",minimal:"Minimal",aurea:"Áurea",diagonal:"Diagonal",centro:"Centro",moldura:"Moldura"};
 
 const S = {
   mode:"idle", ratio:0.8, src:{w:0,h:0}, fit:"cover",
@@ -400,6 +435,8 @@ function metrics(F,x0,y0,cw,ch,s,subj){
   // golden-ratio points count as strong points too
   m.phi=Math.min(...PHI.map(p=>Math.hypot(m.cx-p[0],m.cy-p[1])));
   m.pp=Math.min(m.third,m.phi*1.05);
+  m.ctr=Math.hypot(m.cx-.5,m.cy-.5);
+  m.dline=Math.min(Math.abs(m.cx-m.cy),Math.abs(m.cx-(1-m.cy)))/1.414;   // distance to the two diagonals
   // balance: the weight should not sit against an edge
   m.edgeDist=Math.min(m.cx,1-m.cx,m.cy,1-m.cy);
   // light: bright edges pull the eye out of the picture; a darker surround frames it
@@ -427,6 +464,9 @@ function metrics(F,x0,y0,cw,ch,s,subj){
     let tgt=TH;
     if(subj.facing==="left") tgt=TH.filter(p=>p[0]>.5); else if(subj.facing==="right") tgt=TH.filter(p=>p[0]<.5);
     m.f3=Math.min(...tgt.map(p=>Math.hypot(fx-p[0],fy-p[1])));
+    let tgp=PHI;
+    if(subj.facing==="left") tgp=PHI.filter(p=>p[0]>.5); else if(subj.facing==="right") tgp=PHI.filter(p=>p[0]<.5);
+    m.fphi=Math.min(...tgp.map(p=>Math.hypot(fx-p[0],fy-p[1])));
     m.fc=Math.abs(fx-.5)+.5*Math.abs(fy-.45);
     m.fill=(subj.box[3]*F.H)/ch;
     // headroom: space above the subject, neither cramped nor empty
@@ -452,6 +492,19 @@ function scoreOf(style,m,subj){
     sc= .5*m.salIn + .6*lg(m.dens) + 1.8*m.symEff - (m.symEff<.5?1:0) - 2*Math.abs(m.cx-.5) - 1.4*over - .3*clut - .9*Math.abs(m.s-.62) - thin;
     if(m.hy!=null) sc+= -.9*Math.abs(m.hy-.5);
     if(subj && m.cover!=null) sc+= -2.2*(1-m.cover) - 1.0*m.fc;
+  } else if(style==="aurea"){
+    sc= .55*m.salIn + .8*lg(m.dens) - 1.8*m.phi + .3*m.diag - 1.4*over - .35*clut - 1.0*Math.abs(m.s-.55) - thin;
+    if(m.hy!=null) sc+= -1.2*Math.min(Math.abs(m.hy-.382),Math.abs(m.hy-.618));
+    if(subj && m.cover!=null) sc+= -2.2*(1-m.cover) - 1.2*m.fphi;
+  } else if(style==="diagonal"){
+    sc= .5*m.salIn + .7*lg(m.dens) + 1.4*m.diag - 2.0*m.dline - 1.4*over - .3*clut - .9*Math.abs(m.s-.6) - thin;
+    if(subj && m.cover!=null) sc+= -2.2*(1-m.cover);
+  } else if(style==="centro"){
+    sc= .55*m.salIn + .8*lg(m.dens) - 2.2*m.ctr - 1.4*over - .35*clut - .9*Math.abs(m.s-.55) - thin;
+    if(subj && m.cover!=null) sc+= -2.2*(1-m.cover) - 1.2*m.fc;
+  } else if(style==="moldura"){
+    sc= .5*m.salIn + .6*lg(m.dens) + 3.0*Math.max(0,-m.edgeBright) + .25*Math.min(m.clutter,2.5) - 1.2*m.ctr - .6*over - .9*Math.abs(m.s-.75) - thin;
+    if(subj && m.cover!=null) sc+= -2.2*(1-m.cover);
   } else {
     sc= .35*m.salIn + 1.2*m.simp + .8*lg(m.dens) - 1.6*m.pp - 1.6*over - .8*Math.abs(m.s-.55) - thin*1.5;
     if(m.hy!=null) sc+= -1.0*Math.min(Math.abs(m.hy-2/3),Math.abs(m.hy-1/3));
@@ -477,6 +530,8 @@ function autoStyle(C){
   const sm=C.best.simetrico.m, mn=C.best.minimal.m;
   if(sm.symEff>.72 && Math.abs(sm.cx-.5)<.08) return "simetrico";
   if(mn.simp>.72 && mn.dens>1.3) return "minimal";
+  if(C.best.moldura.m.edgeBright<-.18) return "moldura";
+  if(C.best.diagonal.m.diag>.55 && C.best.diagonal.m.dline<.06) return "diagonal";
   return "tercos";
 }
 function toSrc(c,F){
@@ -489,6 +544,10 @@ function styleTip(st,m){
   if(S.claudeTip && st===S.hint) return S.claudeTip;
   if(st==="simetrico") return m.hy!=null&&Math.abs(m.hy-.5)<.1 ? "Reflexo: horizonte ao centro, tudo espelhado" : "Simetria: o eixo da cena ao centro";
   if(st==="minimal") return "Espaço vazio a trabalhar a favor do motivo";
+  if(st==="aurea") return "Peso visual nos pontos da proporção áurea";
+  if(st==="diagonal") return "Linhas diagonais a conduzir o olhar";
+  if(st==="centro") return "Motivo ao centro: força e estabilidade";
+  if(st==="moldura") return "A própria cena emoldura o motivo";
   return m.hy!=null ? "Horizonte num terço, peso visual num ponto forte" : "Peso visual num ponto forte dos terços";
 }
 function applyStyle(){
@@ -518,7 +577,7 @@ function layout(){
 }
 function trackOffset(){
   if(S.mode!=="live" || !S.gyro) return {dx:0,dy:0};
-  const ppd=Math.max(S.src.w,S.src.h)/S.set.fov, k=S.set.invert?-1:1;
+  const ppd=Math.max(S.src.w,S.src.h)/(S.set.fov/(S.camZoom||1)), k=S.set.invert?-1:1;
   return {dx:S.track.yaw*ppd*k, dy:S.track.pitch*ppd*k};
 }
 function curFrame(){
@@ -551,12 +610,14 @@ function onMotion(e){
     S.level=true;
   }
 }
+let motionOn=false;
 async function enableMotion(){
+  if(motionOn) return;
   try{
     if(typeof DeviceMotionEvent!=="undefined" && typeof DeviceMotionEvent.requestPermission==="function"){
       const p=await DeviceMotionEvent.requestPermission(); if(p!=="granted") return;
     }
-    window.addEventListener("devicemotion",onMotion);
+    window.addEventListener("devicemotion",onMotion); motionOn=true;
   }catch{}
 }
 
@@ -569,7 +630,8 @@ function stepBack(){
 }
 function closeTop(){
   if(!$("#settings").hidden){ $("#settings").hidden=true; return; }
-  if(!$("#result").hidden){ $("#result").hidden=true; if(S.mode==="live") clearAI(); return; }
+  if(!$("#result").hidden){ $("#result").hidden=true; keepEdits(); if(S.mode==="live") clearAI(); return; }
+  if(!$("#gallery").hidden){ $("#gallery").hidden=true; return; }
   if(S.mode!=="idle") goHome();
 }
 window.addEventListener("popstate",closeTop);
@@ -585,10 +647,11 @@ function goHome(){
 
 /* ---------- Modes ---------- */
 let stream=null, liveTimer=null, ticking=false;
-async function startLive(){
+async function startLive(deviceId){
   setMsg("A abrir a câmara…");
+  const size={width:{ideal:1920},height:{ideal:1920}};
   try{
-    stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:"environment"},width:{ideal:1920},height:{ideal:1920}}});
+    stream=await navigator.mediaDevices.getUserMedia({audio:false,video: typeof deviceId==="string" ? {deviceId:{exact:deviceId},...size} : {facingMode:{ideal:"environment"},...size}});
   }catch(e){
     setMsg("A câmara está bloqueada. Abre a app por um link HTTPS ou por localhost, ou usa uma foto.","err");
     return;
@@ -599,11 +662,49 @@ async function startLive(){
   await new Promise(r=>{ if(video.videoWidth) r(); else video.onloadedmetadata=()=>r(); });
   S.mode="live"; S.fit="cover"; S.frame=null; S.comp=null; S.subj=null;
   if(wasIdle) pushLayer("mode");
+  const tr=stream.getVideoTracks()[0];
+  S.camId=(tr.getSettings&&tr.getSettings().deviceId)||null;
+  try{ S.cams=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==="videoinput"); }catch{ S.cams=[]; }
+  S.camZoom=1; S.zoomCaps=null;
+  try{ const c=tr.getCapabilities&&tr.getCapabilities(); if(c&&c.zoom&&c.zoom.max>c.zoom.min){ S.zoomCaps=c.zoom; S.camZoom=tr.getSettings().zoom||1; } }catch{}
   $("#intro").hidden=true; syncButtons();
-  liveMeta().then(m=>{ S.meta=m; });
+  liveMeta().then(m=>{ S.liveMeta=m; });
   enableMotion();
   if(engine()==="local") loadDetector().catch(()=>{});
   setMsg("Aponta para a cena e carrega em IA."); tipEl.textContent="";
+}
+function lensName(c,i,n){
+  const l=(c&&c.label||"").toLowerCase();
+  const side=/front|frontal|user|selfie/.test(l)?"Frontal":/back|rear|traseira|environment/.test(l)?"Traseira":"Câmara";
+  return `${side} · ${i+1}/${n}`;
+}
+async function nextLens(){
+  if(!S.cams || S.cams.length<2) return;
+  const i=S.cams.findIndex(c=>c.deviceId===S.camId), nx=S.cams[(i+1)%S.cams.length];
+  clearAI(); stopLive(); await startLive(nx.deviceId);
+}
+async function setCamZoom(z){
+  const tr=stream&&stream.getVideoTracks()[0]; if(!tr) return;
+  try{ await tr.applyConstraints({advanced:[{zoom:z}]}); S.camZoom=(tr.getSettings().zoom)||z; clearAI(); }catch{ setMsg("Esta câmara não aceitou esse zoom.","err"); }
+  renderCamCtrl();
+}
+function renderCamCtrl(){
+  const wrap=$("#camCtrl"), zs=$("#zooms"), lens=$("#btnLens");
+  const n=(S.cams||[]).length;
+  lens.hidden = n<2;
+  if(n>=2){ const i=Math.max(0,S.cams.findIndex(c=>c.deviceId===S.camId)); lens.textContent=lensName(S.cams[i],i,n); }
+  zs.hidden = !S.zoomCaps;
+  if(S.zoomCaps){
+    const {min,max}=S.zoomCaps;
+    const vals=[...new Set([min,1,2,3,5].filter(v=>v>=min-1e-6&&v<=max+1e-6).map(v=>Math.round(v*10)/10))].sort((a,b)=>a-b);
+    const key=vals.join(",")+"|"+S.camZoom;
+    if(zs.dataset.key!==key){
+      zs.dataset.key=key; zs.innerHTML="";
+      vals.forEach(v=>{ const b=document.createElement("button"); b.textContent=(v<1?String(v).replace(/^0/,""):v)+"×";
+        b.setAttribute("aria-pressed",String(Math.abs(v-S.camZoom)<.06)); b.onclick=()=>setCamZoom(v); zs.appendChild(b); });
+    }
+  }
+  wrap.hidden = S.mode!=="live" || !!S.frame || S.busy || (lens.hidden && zs.hidden);
 }
 function setZoom(on){
   S.zoom=on; S.alignedSince=0;
@@ -649,7 +750,8 @@ async function liveMeta(){
 }
 $("#file").addEventListener("change",e=>{
   const f=e.target.files&&e.target.files[0]; if(!f) return;
-  S.meta=null; readExif(f).then(m=>{ S.meta=m; });
+  S.photoMeta=null; readExif(f).then(m=>{ S.photoMeta=m; });
+  if(!$("#gallery").hidden) stepBack();
   const wasIdle=S.mode==="idle";
   stopLive();
   const url=URL.createObjectURL(f);
@@ -732,6 +834,12 @@ function capture(){
   const c=document.createElement("canvas"); c.width=Math.round(w*sc); c.height=Math.round(h*sc);
   c.getContext("2d").drawImage(el,x,y,w,h,0,0,c.width,c.height);
   S.shot=c; S.shotZoom=Math.sqrt((SW*SH)/(w*h)); S.shotDate=new Date();
+  S.meta = S.mode==="live" ? {...(S.liveMeta||{}), focal35:Math.round(26*(S.camZoom||1))} : S.photoMeta;
+  const rec={id:Date.now(), zoom:S.shotZoom, date:S.shotDate.getTime(), meta:S.meta||null, style:S.style,
+             subj:(S.subj&&S.subj.name)||"", filter:S.filter, border:S.border};
+  S.cur=rec;
+  c.toBlob(b=>{ rec.blob=b; makeThumb(c).then(t=>{ rec.thumb=t; DB.put(rec).then(refreshThumb).catch(()=>{}); }); },"image/jpeg",.95);
+  if(S.mode==="live"){ S.frame=null; S.comp=null; setZoom(false); syncButtons(); setMsg("Foto na galeria da app. Carrega em IA para a próxima."); tipEl.textContent=""; }
   renderResult(); $("#result").hidden=false; pushLayer("result");
 }
 /* Filters: a CSS tone curve plus optional colour wash, grain and vignette */
@@ -885,7 +993,57 @@ async function save(){
   setMsg("Foto guardada.","ok"); stepBack();
 }
 
+/* ---------- App gallery: photos stay in this browser (IndexedDB) ---------- */
+const DB={
+  p:null,
+  open(){ if(!this.p) this.p=new Promise((res,rej)=>{ try{ const r=indexedDB.open("enquadra",1);
+      r.onupgradeneeded=()=>r.result.createObjectStore("shots",{keyPath:"id"});
+      r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); }catch(e){ rej(e); } }); return this.p; },
+  async tx(mode,fn){ const db=await this.open(); return new Promise((res,rej)=>{ const t=db.transaction("shots",mode); const out=fn(t.objectStore("shots")); t.oncomplete=()=>res(out&&out.result); t.onerror=()=>rej(t.error); }); },
+  put(r){ return this.tx("readwrite",st=>st.put(r)); },
+  del(id){ return this.tx("readwrite",st=>st.delete(id)); },
+  async all(){ const r=await this.tx("readonly",st=>st.getAll()); return (r||[]).sort((a,b)=>b.id-a.id); }
+};
+function makeThumb(c){
+  const t=document.createElement("canvas"), k=240/Math.min(c.width,c.height);
+  t.width=Math.round(c.width*k); t.height=Math.round(c.height*k); t.getContext("2d").drawImage(c,0,0,t.width,t.height);
+  return new Promise(r=>t.toBlob(r,"image/jpeg",.8));
+}
+let thumbURL=null, galURLs=[];
+async function refreshThumb(){
+  try{ const all=await DB.all(), img=$("#galThumb");
+    if(thumbURL){ URL.revokeObjectURL(thumbURL); thumbURL=null; }
+    if(all.length){ thumbURL=URL.createObjectURL(all[0].thumb||all[0].blob); img.src=thumbURL; img.hidden=false; $("#galThumbTxt").hidden=true; }
+    else { img.hidden=true; $("#galThumbTxt").hidden=false; }
+  }catch{}
+}
+async function renderGallery(){
+  const grid=$("#galGrid"); grid.innerHTML=""; galURLs.forEach(u=>URL.revokeObjectURL(u)); galURLs=[];
+  let recs; try{ recs=await DB.all(); }catch{ grid.innerHTML='<p class="gal-empty">A galeria não está disponível neste browser.</p>'; return; }
+  if(!recs.length){ grid.innerHTML='<p class="gal-empty">Ainda não há fotos. Tira uma com a câmara da app.</p>'; return; }
+  recs.forEach(r=>{ const b=document.createElement("button"), img=new Image(), u=URL.createObjectURL(r.thumb||r.blob); galURLs.push(u);
+    img.src=u; img.alt="Foto de "+new Date(r.date).toLocaleDateString("pt-PT"); b.appendChild(img); b.onclick=()=>openRecord(r); grid.appendChild(b); });
+}
+async function openGallery(){ await renderGallery(); $("#gallery").hidden=false; pushLayer("gallery"); }
+async function openRecord(r){
+  try{
+    const bmp=await createImageBitmap(r.blob), c=document.createElement("canvas"); c.width=bmp.width; c.height=bmp.height; c.getContext("2d").drawImage(bmp,0,0);
+    S.shot=c; S.shotZoom=r.zoom||1; S.shotDate=new Date(r.date); S.meta=r.meta; if(r.style) S.style=r.style;
+    S.subj=r.subj?{name:r.subj}:null; S.filter=r.filter||"clean"; S.border=r.border||"none"; S.cur=r;
+    buildOpts(); renderResult(); $("#result").hidden=false; pushLayer("result");
+  }catch{ setMsg("Não consegui abrir essa foto.","err"); }
+}
+function keepEdits(){ if(S.cur && S.cur.blob){ S.cur.filter=S.filter; S.cur.border=S.border; DB.put(S.cur).catch(()=>{}); } }
+
 /* ---------- Overlay drawing & guidance ---------- */
+function guides(fx,fy,fw,fh){   // the guide lines of the active rule, inside the frame
+  const st=S.style;
+  if(st==="simetrico"||st==="centro"){ ctx.moveTo(fx+fw/2,fy); ctx.lineTo(fx+fw/2,fy+fh); ctx.moveTo(fx,fy+fh/2); ctx.lineTo(fx+fw,fy+fh/2); }
+  else if(st==="aurea"){ for(const p of [.382,.618]){ ctx.moveTo(fx+fw*p,fy); ctx.lineTo(fx+fw*p,fy+fh); ctx.moveTo(fx,fy+fh*p); ctx.lineTo(fx+fw,fy+fh*p); } }
+  else if(st==="diagonal"){ ctx.moveTo(fx,fy); ctx.lineTo(fx+fw,fy+fh); ctx.moveTo(fx+fw,fy); ctx.lineTo(fx,fy+fh); }
+  else if(st==="moldura"){ const ix=fw*.14, iy=fh*.14; ctx.rect(fx+ix,fy+iy,fw-2*ix,fh-2*iy); }
+  else for(let i=1;i<3;i++){ ctx.moveTo(fx+fw*i/3,fy); ctx.lineTo(fx+fw*i/3,fy+fh); ctx.moveTo(fx,fy+fh*i/3); ctx.lineTo(fx+fw,fy+fh*i/3); }
+}
 function rr(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
 function draw(){
   requestAnimationFrame(draw);
@@ -926,8 +1084,7 @@ function draw(){
       if(hyS>fy+4 && hyS<fy+fh-4){ ctx.setLineDash([3,5]); ctx.strokeStyle="rgba(255,255,255,.55)"; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(fx+6,hyS); ctx.lineTo(fx+fw-6,hyS); ctx.stroke(); ctx.setLineDash([]); }
     }
     ctx.strokeStyle=aligned?"rgba(123,216,143,.35)":"rgba(242,179,61,.3)"; ctx.lineWidth=1; ctx.beginPath();
-    if(S.style==="simetrico"){ ctx.moveTo(fx+fw/2,fy); ctx.lineTo(fx+fw/2,fy+fh); ctx.moveTo(fx,fy+fh/2); ctx.lineTo(fx+fw,fy+fh/2); }
-    else for(let i=1;i<3;i++){ ctx.moveTo(fx+fw*i/3,fy); ctx.lineTo(fx+fw*i/3,fy+fh); ctx.moveTo(fx,fy+fh*i/3); ctx.lineTo(fx+fw,fy+fh*i/3); }
+    guides(fx,fy,fw,fh);
     ctx.stroke();
     ctx.strokeStyle=col; ctx.lineWidth=3; rr(fx,fy,fw,fh,14); ctx.stroke();
     const fcx=fx+fw/2, fcy=fy+fh/2;
@@ -940,7 +1097,8 @@ function draw(){
     const chipY = fy+fh+8+24<L.VH ? fy+fh+8 : Math.max(8,fy-32);
     chip.style.left=cl(fx,8,Math.max(8,L.VW-160))+"px"; chip.style.top=chipY+"px";
     const z=Math.sqrt((S.src.w*S.src.h)/(f.w*f.h));
-    $("#rFocal").textContent=`≈ ${Math.round(26*z)} mm · ${z.toFixed(1)}×`;
+    const cz=S.mode==="live"?(S.camZoom||1):1;
+    $("#rFocal").textContent=`≈ ${Math.round(26*z*cz)} mm · ${(z*cz).toFixed(1)}×`;
     if(S.mode==="live" && !S.busy){
       if(S.zoom) setMsg(S.gyro?"Enquadrado. Carrega no botão.":"Sem giroscópio: este é o crop. Carrega no botão.","ok");
       else {
@@ -949,7 +1107,7 @@ function draw(){
         setMsg(h||v ? "Aponta "+[h,v].filter(Boolean).join(" e ")+"." : "Segura…");
       }
     }
-  } else { chip.hidden=true; if(S.mode==="live") $("#rFocal").textContent="26 mm · 1.0×"; }
+  } else { chip.hidden=true; if(S.mode==="live") $("#rFocal").textContent=`${Math.round(26*(S.camZoom||1))} mm · ${(S.camZoom||1).toFixed(1)}×`; }
 
   if(!S.zoom){ ctx.strokeStyle=aligned?"#7bd88f":"rgba(255,255,255,.85)"; ctx.lineWidth=1.5; ctx.beginPath();
   ctx.moveTo(cx-9,cy); ctx.lineTo(cx+9,cy); ctx.moveTo(cx,cy-9); ctx.lineTo(cx,cy+9); ctx.stroke(); }
@@ -987,13 +1145,12 @@ stage.addEventListener("pointerup",endDrag); stage.addEventListener("pointercanc
 /* ---------- UI wiring ---------- */
 function setMsg(t,kind){ if(msgEl.textContent!==t) msgEl.textContent=t; msgEl.className="msg"+(kind?" "+kind:""); }
 function syncButtons(){
-  const m=$("#btnMode"), a=$("#btnAnalyze"), lp=$("#lblPhoto");
+  const a=$("#btnAnalyze");
   a.disabled=S.mode==="idle"||S.busy;
   a.textContent = S.mode==="live" ? (S.frame?"Repetir IA":"IA") : "Reanalisar";
   a.classList.toggle("ai",S.mode==="live" && !S.frame);
-  lp.hidden = S.mode!=="live";
-  m.hidden = S.mode==="live";
-  m.disabled = S.mode==="idle";
+  $("#btnGallery").hidden = S.mode==="idle";
+  renderCamCtrl();
   $("#btnHome").hidden = S.mode==="idle";
   $("#styles").hidden = !S.comp;
   shutter.classList.toggle("busy",S.busy);
@@ -1004,9 +1161,28 @@ shutter.addEventListener("click",()=>{
   if(S.mode==="photo" && !S.frame) return analyze();
   capture();
 });
-$("#btnLive").onclick=startLive;
+$("#btnLive").onclick=()=>startLive();
 $("#btnAnalyze").onclick=analyze;
-$("#btnMode").onclick=startLive;
+$("#btnGallery").onclick=openGallery;
+$("#btnGalIntro").onclick=openGallery;
+$("#btnGalClose").onclick=stepBack;
+$("#btnLens").onclick=nextLens;
+let delArm=0;
+$("#btnDel").onclick=async()=>{
+  const b=$("#btnDel"); if(!S.cur) return;
+  if(!delArm){ delArm=1; b.textContent="Toca outra vez para apagar"; setTimeout(()=>{ delArm=0; b.textContent="Apagar da galeria"; },3000); return; }
+  delArm=0; b.textContent="Apagar da galeria";
+  const id=S.cur.id; S.cur=null;
+  try{ await DB.del(id); }catch{}
+  refreshThumb(); if(!$("#gallery").hidden) renderGallery();
+  stepBack();
+};
+$("#btnShare").hidden = !!window.claude || !navigator.canShare;
+$("#btnShare").onclick=async()=>{
+  const blob=await new Promise(r=>$("#out").toBlob(r,"image/jpeg",.92));
+  const file=new File([blob],"enquadra.jpg",{type:"image/jpeg"});
+  try{ if(navigator.canShare({files:[file]})) await navigator.share({files:[file]}); }catch{}
+};
 $("#btnHome").onclick=stepBack;
 $("#btnBack").onclick=stepBack;
 $("#btnSave").onclick=save;
@@ -1023,6 +1199,6 @@ $("#tier").addEventListener("change",e=>{ S.set.tier=e.target.value; store.set("
 fov.addEventListener("input",()=>{ S.set.fov=+fov.value; fovVal.textContent=fov.value; store.set("fov",S.set.fov); });
 $("#invert").addEventListener("change",e=>{ S.set.invert=e.target.checked; store.set("invert",S.set.invert); });
 
-buildOpts(); renderEngine(); syncButtons(); initRuntime(); requestAnimationFrame(draw);
+buildOpts(); renderEngine(); syncButtons(); initRuntime(); refreshThumb(); requestAnimationFrame(draw);
 })();
 </script>
