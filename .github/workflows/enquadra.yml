@@ -63,8 +63,8 @@ jobs:
                   applicationId = "pt.filipe.enquadra"
                   minSdk = 29
                   targetSdk = 34
-                  versionCode = 7
-                  versionName = "0.7"
+                  versionCode = 8
+                  versionName = "0.8"
               }
               signingConfigs {
                   getByName("debug") {
@@ -182,6 +182,7 @@ jobs:
            */
           class MainActivity : ComponentActivity() {
               private lateinit var root: FrameLayout
+              private lateinit var stageBox: FrameLayout     // sits exactly under the page's stage, clips with round corners
               private lateinit var preview: PreviewView
               private lateinit var web: WebView
 
@@ -259,18 +260,24 @@ jobs:
                   val density = resources.displayMetrics.density
 
                   root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
-                  preview = PreviewView(this).apply {
-                      implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                      scaleType = PreviewView.ScaleType.FILL_CENTER
-                      // stays VISIBLE: an invisible TextureView is never drawn, so the camera would never get its surface
+                  stageBox = FrameLayout(this).apply {
                       clipToOutline = true
+                      clipChildren = true
                       outlineProvider = object : ViewOutlineProvider() {
                           override fun getOutline(view: View, outline: Outline) {
                               outline.setRoundRect(0, 0, view.width, view.height, 20f * density)
                           }
                       }
                   }
-                  root.addView(preview, FrameLayout.LayoutParams(1, 1))
+                  preview = PreviewView(this).apply {
+                      implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                      scaleType = PreviewView.ScaleType.FILL_CENTER
+                      // stays VISIBLE: an invisible TextureView is never drawn, so the camera would never get its surface
+                      pivotX = 0f
+                      pivotY = 0f
+                  }
+                  stageBox.addView(preview, FrameLayout.LayoutParams(-1, -1))
+                  root.addView(stageBox, FrameLayout.LayoutParams(1, 1))
 
                   web = WebView(this)
                   web.setBackgroundColor(Color.TRANSPARENT)
@@ -441,12 +448,12 @@ jobs:
               private fun onFrame(img: ImageProxy) {
                   try {
                       val now = SystemClock.uptimeMillis()
-                      if (now - lastPush < 120) return
+                      if (now - lastPush < 70) return
                       lastPush = now
                       val up = upright(cropTo(img.toBitmap(), img.cropRect), img.imageInfo.rotationDegrees)
                       synchronized(frameLock) { latest = up }
                       if (!pageReady) return
-                      val b64 = jpeg(scaleTo(up, 360), 65)
+                      val b64 = jpeg(scaleTo(up, 420), 72)
                       val z = camera?.cameraInfo?.zoomState?.value?.zoomRatio ?: 1f
                       js("window.__nf&&__nf('data:image/jpeg;base64,$b64',$z)")
                   } catch (e: Throwable) {
@@ -537,15 +544,27 @@ jobs:
                           val lp = FrameLayout.LayoutParams(max(1, (w * d).roundToInt()), max(1, (h * d).roundToInt()))
                           lp.leftMargin = (x * d).roundToInt()
                           lp.topMargin = (y * d).roundToInt()
-                          preview.layoutParams = lp
-                          preview.invalidateOutline()
+                          stageBox.layoutParams = lp
+                          stageBox.invalidateOutline()
                           preview.post { bindCamera() }   // (re)bind once laid out: the viewport follows the stage
                       }
                   }
 
                   @JavascriptInterface
                   fun previewVisible(v: Boolean) {
-                      ui.post { preview.alpha = if (v) 1f else 0f }
+                      ui.post { stageBox.alpha = if (v) 1f else 0f }
+                  }
+
+                  /** The same digital zoom the page applies to the browser video: translate, then scale from the top-left. */
+                  @JavascriptInterface
+                  fun setPreviewTransform(z: Double, tx: Double, ty: Double) {
+                      ui.post {
+                          val d = resources.displayMetrics.density
+                          preview.scaleX = z.toFloat()
+                          preview.scaleY = z.toFloat()
+                          preview.translationX = (tx * d).toFloat()
+                          preview.translationY = (ty * d).toFloat()
+                      }
                   }
 
                   @JavascriptInterface
@@ -738,5 +757,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: enquadra-apk-0.7
+          name: enquadra-apk-0.8
           path: enquadra/app/build/outputs/apk/debug/app-debug.apk
