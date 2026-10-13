@@ -340,17 +340,27 @@ function parseJSON(t){
   if(a<0||b<a) throw {code:"bad_json"};
   try{ return JSON.parse(t.slice(a,b+1)); }catch{ throw {code:"bad_json"}; }
 }
+const G_TIMEOUT=12000;            // a busy Gemini can hang instead of failing; give up after this
+const G_PAUSE=120000;             // after a timeout/overload, skip Gemini for this long and go local straight away
+let gPausedUntil=0;
+function geminiPaused(){ return Date.now()<gPausedUntil; }
 async function askGemini(b64, prompt){
-  let r;
+  let r, j;
+  const ac=new AbortController(), timer=setTimeout(()=>ac.abort(),G_TIMEOUT);
   try{
-    r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(S.set.gmodel)}:generateContent`,{
-      method:"POST", headers:{"content-type":"application/json","x-goog-api-key":S.set.gkey},
-      body:JSON.stringify({contents:[{role:"user",parts:[{text:prompt},...(b64?[{inline_data:{mime_type:"image/jpeg",data:b64}}]:[])]}],
-        generationConfig:{responseMimeType:"application/json",temperature:persona().temp}})
-    });
-  }catch{ throw {code:"g_net"}; }
-  if(!r.ok){ let m=""; try{ m=((await r.json()).error||{}).message||""; }catch{} throw {code:"g_"+r.status, msg:m}; }
-  const j=await r.json();
+    try{
+      r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(S.set.gmodel)}:generateContent`,{
+        method:"POST", headers:{"content-type":"application/json","x-goog-api-key":S.set.gkey}, signal:ac.signal,
+        body:JSON.stringify({contents:[{role:"user",parts:[{text:prompt},...(b64?[{inline_data:{mime_type:"image/jpeg",data:b64}}]:[])]}],
+          generationConfig:{responseMimeType:"application/json",temperature:persona().temp}})
+      });
+    }catch{ if(ac.signal.aborted){ gPausedUntil=Date.now()+G_PAUSE; throw {code:"g_timeout"}; } throw {code:"g_net"}; }
+    if(!r.ok){
+      if(r.status===429||r.status>=500) gPausedUntil=Date.now()+G_PAUSE;
+      let m=""; try{ m=((await r.json()).error||{}).message||""; }catch{} throw {code:"g_"+r.status, msg:m};
+    }
+    try{ j=await r.json(); }catch{ if(ac.signal.aborted){ gPausedUntil=Date.now()+G_PAUSE; throw {code:"g_timeout"}; } throw {code:"g_empty"}; }
+  }finally{ clearTimeout(timer); }
   const t=((j.candidates&&j.candidates[0]&&j.candidates[0].content&&j.candidates[0].content.parts)||[]).map(p=>p.text||"").join("");
   if(!t) throw {code:"g_empty"};
   return t;
@@ -373,6 +383,8 @@ function fromAI(res){
 function errCopy(e){
   const c=(e&&e.code)||"", m=((e&&e.msg)||"").toLowerCase();
   if(c==="g_net") return "Sem ligação ao Gemini.";
+  if(c==="g_timeout") return "O Gemini demorou demasiado.";
+  if(c==="g_paused") return "Gemini em pausa (estava sobrecarregado).";
   if(c==="g_400") return m.includes("api key")||m.includes("api_key") ? "Gemini: a chave não é válida." : "Gemini: pedido recusado.";
   if(c==="g_401"||c==="g_403") return "Gemini: a chave não tem acesso.";
   if(c==="g_404") return "Gemini: modelo não encontrado. Muda-o nas Definições.";
@@ -843,7 +855,8 @@ async function findShot(){
   try{
     const F=features(el); vtReset();            // the scene is measured at this moment; movement is tracked from here
     const eng=engine(); let plan=null;
-    if(eng!=="local"){
+    if(eng==="gemini" && geminiPaused()) S.note=errCopy({code:"g_paused"})+" Usei o motor local.";
+    else if(eng!=="local"){
       try{
         const {w,h}=S.src, k=Math.min(1,1024/Math.max(w,h));
         const c=document.createElement("canvas"); c.width=Math.round(w*k); c.height=Math.round(h*k);
