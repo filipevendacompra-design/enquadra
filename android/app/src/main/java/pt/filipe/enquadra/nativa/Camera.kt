@@ -51,7 +51,7 @@ class Cam(private val ctx: Context) {
 
     fun info(): String {
         val c = capture?.resolutionInfo?.resolution; val a = analysis?.resolutionInfo?.resolution
-        return "foto ${c?.width ?: "?"}×${c?.height ?: "?"} · análise ${a?.width ?: "?"}×${a?.height ?: "?"} · zoom ${"%.2f".format(minZoom)}–${"%.1f".format(maxZoom)}" +
+        return (if (exactZoom) "zoom por frame: sim · " else "zoom por frame: não · ") + "foto ${c?.width ?: "?"}×${c?.height ?: "?"} · análise ${a?.width ?: "?"}×${a?.height ?: "?"} · zoom ${"%.2f".format(minZoom)}–${"%.1f".format(maxZoom)}" +
             (if (lastError.isNotEmpty()) "\nerro: $lastError" else "")
     }
 
@@ -64,13 +64,14 @@ class Cam(private val ctx: Context) {
                 val preview = Preview.Builder()
                     .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY).build())
                     .build().also { it.setSurfaceProvider(pv.surfaceProvider) }
-                val an = ImageAnalysis.Builder()
+                val anB = ImageAnalysis.Builder()
                     .setResolutionSelector(ResolutionSelector.Builder()
                         .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
                         .setResolutionStrategy(ResolutionStrategy(Size(1280, 960), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER)).build())
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-                    .build()
+                listenZoom(anB)
+                val an = anB.build()
                 an.setAnalyzer(exec) { img -> try { onFrame(img) } catch (e: Throwable) { lastError = "análise: ${e.message}" } finally { img.close() } }
                 val cap = ImageCapture.Builder()
                     .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
@@ -99,6 +100,23 @@ class Cam(private val ctx: Context) {
         }, ContextCompat.getMainExecutor(ctx))
     }
 
+    // ---- the real zoom of each frame, from the camera's own reports (frames lag the zoom command) ----
+    private val zoomAt = java.util.concurrent.ConcurrentHashMap<Long, Float>()
+    @Volatile var exactZoom = false
+    @androidx.annotation.OptIn(markerClass = [androidx.camera.camera2.interop.ExperimentalCamera2Interop::class])
+    private fun listenZoom(b: ImageAnalysis.Builder) {
+        if (android.os.Build.VERSION.SDK_INT < 30) return
+        androidx.camera.camera2.interop.Camera2Interop.Extender(b).setSessionCaptureCallback(object : android.hardware.camera2.CameraCaptureSession.CaptureCallback() {
+            override fun onCaptureCompleted(s: android.hardware.camera2.CameraCaptureSession, r: android.hardware.camera2.CaptureRequest, res: android.hardware.camera2.TotalCaptureResult) {
+                val ts = res.get(android.hardware.camera2.CaptureResult.SENSOR_TIMESTAMP) ?: return
+                val z = res.get(android.hardware.camera2.CaptureResult.CONTROL_ZOOM_RATIO) ?: return
+                zoomAt[ts] = z
+                if (zoomAt.size > 60) { val cut = ts - 2_000_000_000L; zoomAt.keys.removeIf { it < cut } }
+            }
+        })
+    }
+    private fun frameZoom(ts: Long): Float? = zoomAt[ts]
+
     fun setZoom(z: Float, done: (() -> Unit)? = null) {
         val c = camera ?: run { done?.invoke(); return }
         val fut = c.cameraControl.setZoomRatio(z.coerceIn(minZoom, maxZoom))
@@ -114,6 +132,7 @@ class Cam(private val ctx: Context) {
     private var ybuf = ByteArray(0)
     private var zPrevFrame = 0.0
     private var zRef = 0.0
+    private var zPrevExact = false
 
     private fun onFrame(img: ImageProxy) {
         val crop = img.cropRect; val rot = img.imageInfo.rotationDegrees
@@ -128,10 +147,12 @@ class Cam(private val ctx: Context) {
         synchronized(lock) { sn = wantSnap; wantSnap = null; hg = wantHiGray; wantHiGray = null }
         if (trackOn || sn != null) {
             val g = yGray(crop, rot, upW, upH, rs, ps, 128)
-            val zNow = zoom.toDouble()
+            val fz = frameZoom(img.imageInfo.timestamp)
+            exactZoom = fz != null
+            val zNow = (fz ?: zoom).toDouble()
             if (sn != null || tracker.resetPending) { tracker.reset(); zRef = zNow }   // tracking starts from the frame the AI sees
-            tracker.step(g, if (zPrevFrame > 0) zNow / zPrevFrame else 1.0, if (zRef > 0) zNow / zRef else 1.0)
-            zPrevFrame = zNow
+            tracker.step(g, if (zPrevFrame > 0) zNow / zPrevFrame else 1.0, if (zRef > 0) zNow / zRef else 1.0, fz != null)
+            zPrevFrame = zNow; zPrevExact = fz != null
         }
         if (hg != null) { val g = yGray(crop, rot, upW, upH, rs, ps, hg.first); main.post { hg.second(g) } }
         if (sn != null) {
