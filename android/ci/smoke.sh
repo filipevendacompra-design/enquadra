@@ -31,10 +31,10 @@ sleep 1.2; shot 3c-lente
 sleep 3; shot 3d-lente-final
 tap_desc "Tirar foto"; sleep 6; shot 4-resultado
 adb shell input keyevent KEYCODE_BACK; sleep 2
-tap_desc "Definições"; sleep 2; shot 5-definicoes
-adb shell input swipe 500 1800 500 600 300; sleep 1; shot 6-definicoes-fim
+tap_desc "Definições"; sleep 2; shot 5-definicoes; adb shell uiautomator dump /sdcard/ui2.xml >/dev/null 2>&1; adb pull /sdcard/ui2.xml $OUT/ui2.xml >/dev/null 2>&1
+adb shell input swipe 500 1800 500 300 300; sleep 1; adb shell input swipe 500 1800 500 300 300; sleep 1; shot 6-definicoes-fim; adb shell uiautomator dump /sdcard/ui3.xml >/dev/null 2>&1; adb pull /sdcard/ui3.xml $OUT/ui3.xml >/dev/null 2>&1
 adb logcat -d -v brief > $OUT/logcat.txt
 grep -E "FATAL|AndroidRuntime|Enquadra|CameraX|Camera2CameraImpl.*(ERROR|error)" $OUT/logcat.txt | head -80 > $OUT/resumo.txt
 adb shell run-as $PKG cat files/crash.txt > $OUT/crash.txt 2>/dev/null || true
 exit 0
-# v6
+# v7

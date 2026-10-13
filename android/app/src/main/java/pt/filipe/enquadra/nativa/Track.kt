@@ -120,7 +120,7 @@ class Tracker {
         val b = best
         if (b == null) {
             // nothing to hold on to (flat wall, sky): still follow the zoom, which we know
-            lost++; val z = if (exact) zoomTotal / S else 1.0
+            lost++; val z = (zoomTotal / S).let { if (exact) it else it.coerceIn(.85, 1.18) }   // follow what the camera says
             S *= z; dx *= z; dy *= z; return
         }
         lost = 0; lastScale = bs
