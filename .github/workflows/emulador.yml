@@ -1,0 +1,52 @@
+name: Emulador (teste da app nativa)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.3"
+      - uses: actions/checkout@v4
+      - name: SDK e assinatura
+        env:
+          KS: ${{ secrets.DEBUG_KEYSTORE }}
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+          echo "$KS" | tr -d ' \n\r' | base64 -d > android/app/enquadra.keystore
+      - name: Compilar
+        run: gradle -p android assembleDebug --no-daemon -q
+      - name: KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Correr no emulador
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back emulated
+          script: bash android/ci/smoke.sh
+      - name: Publicar capturas no ramo ci-shots
+        if: always()
+        run: |
+          mkdir -p /tmp/shots && cp -r ci-out/* /tmp/shots/ 2>/dev/null || true
+          cd /tmp/shots && git init -q && git checkout -q -b ci-shots
+          git -c user.name=ci -c user.email=ci@local add -A && git -c user.name=ci -c user.email=ci@local commit -q -m "capturas ${{ github.run_id }}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci-shots
+          echo "::notice title=resumo::$(head -c 3000 resumo.txt 2>/dev/null | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')"
