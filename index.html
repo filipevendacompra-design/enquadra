@@ -42,9 +42,29 @@ svg{display:block}
 #stage video{object-fit:cover;transform-origin:0 0;will-change:transform}
 #stage img{object-fit:contain}
 #ov{position:absolute;inset:0;width:100%;height:100%}
-.scan{position:absolute;left:0;right:0;height:2px;background:var(--amber);box-shadow:0 0 18px 4px rgba(245,197,49,.45);top:0;animation:scan 1.5s ease-in-out infinite alternate;pointer-events:none}
-@keyframes scan{to{top:calc(100% - 2px)}}
-@media (prefers-reduced-motion:reduce){.scan{animation:none;top:50%}}
+/* searching: focus brackets that breathe, and a soft light sweeping across */
+.scan{position:absolute;inset:0;pointer-events:none;overflow:hidden;border-radius:inherit}
+.scan::before{content:"";position:absolute;inset:16%;
+  --c:var(--amber); --l:28px; --t:2.5px;
+  background:
+    linear-gradient(var(--c),var(--c)) left top/var(--l) var(--t) no-repeat,
+    linear-gradient(var(--c),var(--c)) left top/var(--t) var(--l) no-repeat,
+    linear-gradient(var(--c),var(--c)) right top/var(--l) var(--t) no-repeat,
+    linear-gradient(var(--c),var(--c)) right top/var(--t) var(--l) no-repeat,
+    linear-gradient(var(--c),var(--c)) left bottom/var(--l) var(--t) no-repeat,
+    linear-gradient(var(--c),var(--c)) left bottom/var(--t) var(--l) no-repeat,
+    linear-gradient(var(--c),var(--c)) right bottom/var(--l) var(--t) no-repeat,
+    linear-gradient(var(--c),var(--c)) right bottom/var(--t) var(--l) no-repeat;
+  filter:drop-shadow(0 0 6px rgba(245,197,49,.55));
+  animation:scanb 1.4s cubic-bezier(.45,0,.55,1) infinite}
+@keyframes scanb{0%,100%{inset:12%;opacity:.95}50%{inset:22%;opacity:.55}}
+.scan::after{content:"";position:absolute;top:-30%;bottom:-30%;left:-60%;width:60%;
+  background:linear-gradient(105deg,transparent 0,rgba(245,197,49,.08) 35%,rgba(255,255,255,.20) 50%,rgba(245,197,49,.08) 65%,transparent 100%);
+  animation:scans 1.9s cubic-bezier(.4,0,.2,1) infinite}
+@keyframes scans{from{transform:translateX(0)}to{transform:translateX(330%)}}
+@media (prefers-reduced-motion:reduce){.scan::before,.scan::after{animation:none}}
+/* inside the Android app the camera is a native view under the page */
+body.native,html.native,body.native #stage{background:transparent!important}
 .chip{position:absolute;font:500 12px var(--f-mono);color:var(--amber);background:rgba(0,0,0,.55);border-radius:8px;padding:4px 8px;white-space:nowrap;max-width:70%;overflow:hidden;text-overflow:ellipsis;pointer-events:none;display:flex;align-items:center;gap:6px}
 .chip b{width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
 .chip.ok{color:var(--lock)}
@@ -213,6 +233,10 @@ svg{display:block}
         <option value="auto">Gemini quando está disponível, senão IA local</option>
         <option value="local">Só IA local (nunca usa o Gemini)</option>
       </select>
+      <div id="nanoBox" hidden>
+        <p id="nanoTxt"></p>
+        <button class="btn" id="btnNano" hidden>Descarregar Gemini Nano</button>
+      </div>
       <p id="engineText"></p>
     </div>
     <div class="field">
@@ -306,15 +330,20 @@ async function initRuntime(){
   }
   runtimeChecked=true; renderEngine();
 }
-function engine(){ if(S.set.engine==="local") return "local"; return S.set.gkey ? "gemini" : sampleFn ? "claude" : "local"; }
+function engine(){
+  if(S.set.engine==="local") return "local";
+  if(S.set.engine==="nano") return NATIVE ? "nano" : "local";
+  return S.set.gkey ? "gemini" : sampleFn ? "claude" : "local";
+}
 function renderEngine(){
   const e=engine();
   const st=G.state, chipEl=$("#engChip");
-  $("#engTxt").textContent = e==="gemini" ? (st==="up"?"gemini":st==="down"?"gemini em baixo · local":st==="badkey"?"chave inválida · local":"gemini…") : e==="claude" ? "claude" : (S.set.neural?"local+":"local");
+  $("#engTxt").textContent = e==="gemini" ? (st==="up"?"gemini":st==="down"?"gemini em baixo · local":st==="quota"?"quota esgotada · local":st==="badkey"?"chave inválida · local":"gemini…")
+    : e==="nano" ? "nano" : e==="claude" ? "claude" : (S.set.neural?"local+":"local");
   const es=$("#engineSel"); if(es) es.value=S.set.engine;
   chipEl.classList.toggle("ai", e!=="local");
   chipEl.classList.toggle("up", e==="gemini" && st==="up");
-  chipEl.classList.toggle("down", e==="gemini" && (st==="down"||st==="badkey"));
+  chipEl.classList.toggle("down", e==="gemini" && (st==="down"||st==="badkey"||st==="quota"));
   chipEl.classList.toggle("wait", e==="gemini" && (st==="checking"||st==="unknown"));
   $("#engineText").textContent =
     e==="gemini" ? "Gemini escolhe o motivo; a composição fina é calculada no telemóvel." :
@@ -342,6 +371,15 @@ Choose looks with character when they fit the mood (cinema, pelicula, noir, pb, 
     text:`Style: documentary. People, gestures and everyday moments first; otherwise the detail that tells the story of the place. Honest framing, little stylisation. Looks: clean, pelicula, pb; borders ficha, date or none.`}
 };
 function persona(){ return PERSONAS[S.set.persona]||PERSONAS.criativo; }
+/* The style also drives the local AI: how big the crops are and which rules it prefers. */
+const LOCAL_LOOK={
+  classico:{scales:[.45,.55,.65], styles:["tercos","centro","simetrico","aurea"]},
+  equilibrado:{scales:[.38,.5,.62], styles:["tercos","aurea","centro","simetrico","minimal","diagonal"]},
+  criativo:{scales:[.22,.32,.45,.6], styles:["diagonal","minimal","aurea","tercos"]},
+  minimal:{scales:[.25,.36,.5], styles:["minimal","centro","tercos"]},
+  documental:{scales:[.45,.58,.72], styles:["tercos","centro","aurea"]}
+};
+function localLook(){ return LOCAL_LOOK[S.set.persona]||LOCAL_LOOK.criativo; }
 const PROMPT = (w,h) => {
   const avoid = S.seen.length ? `\nThe user asked for another option: choose something different from ${S.seen.slice(-4).map(x=>`"${x}"`).join(", ")}.` : "";
   return `You are a photo director helping someone take a striking phone photo. The image is the live camera view (${w>h?"landscape":"portrait"}, ${w}x${h}).
@@ -366,7 +404,14 @@ const G_TIMEOUT=12000;            // a busy Gemini can hang instead of failing; 
 const G_PAUSE=120000;             // after a timeout/overload, skip that model for this long
 const G_MODELS=["gemini-3.5-flash-lite","gemini-3.8-flash","gemini-3.6-flash"];
 const gPaused={};                 // model -> skip until (ms)
-const G={state:"unknown", model:"", why:""};   // health: unknown | checking | up | down | badkey | nokey
+const G={state:"unknown", model:"", why:"", at:0, until:0};   // health: unknown | checking | up | down | quota | badkey | nokey | off
+const G_RETRY=600000;   // after a failure, look again at most every 10 minutes
+/** The free quota resets at midnight in California. */
+function nextReset(){
+  const now=new Date(), la=new Date(now.toLocaleString("en-US",{timeZone:"America/Los_Angeles"})), m=new Date(la);
+  m.setHours(24,0,0,0); return m.getTime()+(now-la);
+}
+{ const q=store.get("quota",0); if(q>Date.now()){ G.state="quota"; G.until=q; } }
 function geminiPaused(m){ return Date.now()<(gPaused[m]||0); }
 function fatalKey(e){ const c=(e&&e.code)||"", m=((e&&e.msg)||"").toLowerCase(); return c==="g_401"||c==="g_403"||(c==="g_400"&&(m.includes("api key")||m.includes("api_key"))); }
 /** Models to try, the one known to work first, then the chosen one, then the rest. */
@@ -419,20 +464,32 @@ function setHealth(state, model, why){
 let gChecking=false;
 async function checkGemini(){
   if(engine()!=="gemini"){ setHealth(S.set.gkey?"off":"nokey","",""); return; }
-  if(gChecking) return; gChecking=true;
+  if(G.state==="quota" && Date.now()<G.until) return;
+  if(gChecking) return; gChecking=true; G.at=Date.now();
   if(G.state!=="up") setHealth("checking", G.model);
-  const why=[]; let ok="", bad=false;
+  const why=[]; let ok="", bad=false, quota=0, tried=0;
   for(const m of modelOrder()){
-    const t0=performance.now();
+    const t0=performance.now(); tried++;
     try{ parseJSON(await askGemini(null,'Answer with JSON only: {"ok":true}',m,8000)); ok=m; break; }
-    catch(e){ why.push(m+": "+errCopy(e)+" ("+((performance.now()-t0)/1000).toFixed(1)+" s)"); if(fatalKey(e)){ bad=true; break; } }
+    catch(e){ why.push(m+": "+errCopy(e)+" ("+((performance.now()-t0)/1000).toFixed(1)+" s)"); if(e&&e.code==="g_429") quota++; if(fatalKey(e)){ bad=true; break; } }
   }
   gChecking=false;
-  if(ok){ for(const k in gPaused) delete gPaused[k]; setHealth("up", ok, ""); }
+  if(ok){ for(const k in gPaused) delete gPaused[k]; store.set("quota",0); setHealth("up", ok, ""); }
+  else if(quota && quota===tried) setQuota(why.join("\n"));
   else setHealth(bad?"badkey":"down", "", why.join("\n"));
 }
-setInterval(()=>{ if(document.visibilityState==="visible" && engine()==="gemini") checkGemini(); }, 120000);
-document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible" && engine()==="gemini" && G.state!=="up") checkGemini(); });
+function setQuota(why){
+  G.until=nextReset(); store.set("quota",G.until);
+  const h=new Date(G.until).toLocaleTimeString("pt-PT",{hour:"2-digit",minute:"2-digit"});
+  setHealth("quota","", "Quota gratuita do Gemini esgotada. Volta às "+h+"."+(why?"\n"+why:""));
+}
+/** Look again only when it can have changed: after 10 minutes of failure, never during an exhausted quota. */
+function maybeRecheck(){
+  if(engine()!=="gemini") return;
+  if(G.state==="quota"){ if(Date.now()<G.until) return; G.state="unknown"; store.set("quota",0); }
+  if(G.state!=="up" && G.state!=="checking" && Date.now()-(G.at||0)>G_RETRY) checkGemini();
+}
+document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible") maybeRecheck(); });
 
 async function askClaude(blob, prompt){ return await sampleFn.json(prompt,{images:[blob], modelTier:"quick"}); }
 function fromAI(res){
@@ -462,6 +519,8 @@ function errCopy(e){
   if(c==="g_empty"||c==="bad_json") return "A IA respondeu num formato inesperado.";
   if(c==="not_granted") return "O Claude precisa da tua autorização.";
   if(c==="rate_limited") return "Muitas análises seguidas. Espera um pouco.";
+  if(c==="n_timeout") return "O Gemini Nano demorou demasiado.";
+  if(c==="n_err") return "O Gemini Nano falhou"+(e&&e.msg?" ("+String(e.msg).slice(0,60)+")":"")+".";
   return "Não consegui analisar a cena.";
 }
 
@@ -590,8 +649,9 @@ const NIMA_STYLES=["tercos","aurea","centro","simetrico","minimal","diagonal"];
 /** Local engine: the best crop of each rule, then NIMA picks the most beautiful one. */
 async function nimaPick(F,snap,subj){
   const kx=snap.width/F.W, ky=snap.height/F.H, cands=[];
-  for(const st of NIMA_STYLES){
-    const c=bestCrop(F,subj,S.ratio,st,{scales:[.42,.5,.58]}); if(!c) continue;
+  const look=localLook();
+  for(const st of look.styles){
+    const c=bestCrop(F,subj,S.ratio,st,{scales:look.scales}); if(!c) continue;
     if(cands.some(o=>Math.abs(o.c.x0-c.x0)<2&&Math.abs(o.c.y0-c.y0)<2&&Math.abs(o.c.cw-c.cw)<2)) continue;
     cands.push({c,st});
   }
@@ -618,8 +678,8 @@ function integ(arr,W,H){
 }
 const rs=(I,W,x0,y0,x1,y1)=>{ const w=W+1; return I[y1*w+x1]-I[y0*w+x1]-I[y1*w+x0]+I[y0*w+x0]; };
 
-function features(el,NS){
-  const SW=S.src.w, SH=S.src.h, k=160/Math.max(SW,SH);
+function features(el,NS,dims){
+  const SW=(dims||S.src).w, SH=(dims||S.src).h, k=160/Math.max(SW,SH);
   const W=Math.max(16,Math.round(SW*k)), H=Math.max(16,Math.round(SH*k)), n=W*H;
   fcan.width=W; fcan.height=H;
   const fx=fcan.getContext("2d",{willReadFrequently:true});
@@ -819,7 +879,7 @@ function planCrop(F,plan){
     return bestCrop(F,plan.subj,S.ratio,plan.rule,{scales:[s0*.88,s0,s0*1.12].map(v=>cl(v,.25,.8)),
       center:{x:(plan.shot.x+plan.shot.w/2)*S.src.w*k, y:(plan.shot.y+plan.shot.h/2)*S.src.h*k}, radius:.06});
   }
-  return bestCrop(F,plan.subj,S.ratio,plan.rule,{scales:[.42,.5,.58]});
+  return bestCrop(F,plan.subj,S.ratio,plan.rule,{scales:localLook().scales});
 }
 /* ---------- Visual tracking: how far the scene moved, measured on the image itself ---------- */
 const VT={prev:null, dx:0, dy:0, lost:0, can:null};
@@ -909,7 +969,13 @@ function curFrame(){
     const maxW=Math.min(S.src.w,S.src.h*S.ratio), w=maxW/S.lockRem, h=w/S.ratio;
     return {x:(S.src.w-w)/2, y:(S.src.h-h)/2, w, h};
   }
-  const f=S.frame; if(!f) return null; const {dx,dy}=trackOffset(); return {x:f.x+dx,y:f.y+dy,w:f.w,h:f.h}; }
+  let f=S.frame; if(!f) return null;
+  if(S.refAt && S.refFrom){   // the refinement glides into place
+    const t=cl((performance.now()-S.refAt)/450,0,1), e=t<.5?2*t*t:1-Math.pow(-2*t+2,2)/2, a=S.refFrom;
+    if(t>=1){ S.refAt=0; S.refFrom=null; }
+    else f={x:a.x+(f.x-a.x)*e, y:a.y+(f.y-a.y)*e, w:a.w+(f.w-a.w)*e, h:a.h+(f.h-a.h)*e};
+  }
+  const {dx,dy}=trackOffset(); return {x:f.x+dx,y:f.y+dy,w:f.w,h:f.h}; }
 
 /* ---------- Level (gravity only) ---------- */
 let motionOn=false;
@@ -938,11 +1004,77 @@ function closeTop(){
 }
 window.addEventListener("popstate",closeTop);
 
+/* ---------- Inside the Android app: native camera under the page ---------- */
+const NATIVE=!!(window.Native && typeof window.Native.info==="function");
+if(NATIVE){ document.documentElement.classList.add("native"); document.body.classList.add("native"); }
+const nvc=document.createElement("canvas"); let nvSeq=0, nvBusy=false;
+window.__nf=(url,z)=>{   // a small live frame from the native camera (~12 per second)
+  if(nvBusy) return; nvBusy=true;
+  const im=new Image();
+  im.onload=()=>{ if(nvc.width!==im.width||nvc.height!==im.height){ nvc.width=im.width; nvc.height=im.height; }
+    nvc.getContext("2d").drawImage(im,0,0); nvSeq++; if(z) S.camZoom=z; nvBusy=false; };
+  im.onerror=()=>{ nvBusy=false; };
+  im.src=url;
+};
+function liveEl(){ return NATIVE ? nvc : video; }
+function liveW(){ return NATIVE ? (nvSeq?nvc.width:0) : video.videoWidth; }
+function liveH(){ return NATIVE ? (nvSeq?nvc.height:0) : video.videoHeight; }
+function nativeImage(max){   // a sharp frame of the whole view
+  return new Promise(res=>{ let u=""; try{ u=Native.grab(max); }catch{} if(!u) return res(null);
+    const im=new Image(); im.onload=()=>res(im); im.onerror=()=>res(null); im.src=u; });
+}
+const photoWait={};
+window.__photo=(id,url)=>{ const p=photoWait[id]; if(!p) return; delete photoWait[id]; if(!url) return p(null);
+  const im=new Image(); im.onload=()=>{ const c=document.createElement("canvas"); c.width=im.naturalWidth; c.height=im.naturalHeight; c.getContext("2d").drawImage(im,0,0); p(c); };
+  im.onerror=()=>p(null); im.src=/^https?:/.test(url) ? url+"?t="+Date.now() : url; };
+function nativePhoto(r){   // full-resolution photo from the lens in use, cropped to the frame
+  return new Promise(res=>{ const id="p"+Date.now(); photoWait[id]=res;
+    setTimeout(()=>{ if(photoWait[id]){ delete photoWait[id]; res(null); } },20000);
+    try{ Native.takePhoto(id,r.x,r.y,r.w,r.h); }catch{ delete photoWait[id]; res(null); } });
+}
+const nanoWait={};
+window.__nano=(id,text,err)=>{ const p=nanoWait[id]; if(p){ delete nanoWait[id]; p({text,err}); } };
+function askNano(b64,prompt){
+  return new Promise((res,rej)=>{ const id="n"+Date.now();
+    const t=setTimeout(()=>{ delete nanoWait[id]; rej({code:"n_timeout"}); },25000);
+    nanoWait[id]=r=>{ clearTimeout(t); r.text?res(r.text):rej({code:"n_err",msg:r.err||""}); };
+    try{ Native.nanoAsk(id,prompt,b64); }catch(e){ clearTimeout(t); delete nanoWait[id]; rej({code:"n_err",msg:String(e)}); } });
+}
+function nanoState(){ try{ return NATIVE ? Native.nanoStatus() : "none"; }catch{ return "none"; } }
+function nanoReady(){ return nanoState()==="ready"; }
+window.__nanoProgress=m=>{ const t=$("#nanoTxt"); if(t) t.textContent="Gemini Nano: "+m; renderNano(); };
+function renderNano(){
+  const box=$("#nanoBox"); if(!box) return; box.hidden=!NATIVE; if(!NATIVE) return;
+  const st=nanoState(), txt={ready:"pronto no telemóvel",downloadable:"por descarregar",downloading:"a descarregar",unavailable:"não disponível neste telemóvel"}[st]||st;
+  if(!/MB|falhou/.test($("#nanoTxt").textContent)) $("#nanoTxt").textContent="Gemini Nano: "+txt+". Corre no telemóvel, sem internet e sem quota.";
+  $("#btnNano").hidden=st!=="downloadable";
+}
+let lastRect="", lastVis=null;
+function syncPreview(){   // keep the native camera exactly under the stage
+  if(!NATIVE) return;
+  const r=stage.getBoundingClientRect(), key=[r.left,r.top,r.width,r.height].map(v=>Math.round(v)).join(",");
+  if(key!==lastRect){ lastRect=key; try{ Native.setPreviewRect(r.left,r.top,r.width,r.height); }catch{} }
+  const vis=S.mode==="live"; if(vis!==lastVis){ lastVis=vis; try{ Native.previewVisible(vis); }catch{} }
+}
+
 /* ---------- Camera ---------- */
 let stream=null;
 function vtrack(){ return stream && stream.getVideoTracks()[0]; }
 async function startLive(deviceId){
   stopLive();
+  if(NATIVE){
+    setMsg("A abrir a câmara…","dim"); video.hidden=true; still.hidden=true; $("#nocam").hidden=true;
+    try{ Native.startCamera(); }catch{}
+    const t0=performance.now(); while(!nvSeq && performance.now()-t0<10000) await sleep(100);
+    if(!nvSeq){ showNoCam(); return false; }
+    let ni={}; try{ ni=JSON.parse(Native.info()); }catch{}
+    S.mode="live"; S.fit="cover"; S.phase="idle"; S.frame=null; S.src={w:nvc.width,h:nvc.height}; S.cams=[];
+    S.zoomCaps = ni.maxZoom>ni.minZoom ? {min:ni.minZoom,max:ni.maxZoom} : null;
+    S.camZoom=ni.zoom||1; S.homeZoom=1; if(S.zoomCaps) await applyZoom(1);
+    liveMeta().then(m=>{ S.liveMeta=m; }); enableMotion();
+    if(engine()==="local") loadDetector().catch(()=>{});
+    setMsg("Aponta e toca em ✦ para encontrar a foto.","dim"); ui(); return true;
+  }
   setMsg("A abrir a câmara…","dim");
   const size={width:{ideal:1920},height:{ideal:1920}};
   try{
@@ -977,6 +1109,7 @@ function showNoCam(){
   $("#nocam").hidden=false; setMsg("",""); ui();
 }
 async function applyZoom(z){
+  if(NATIVE){ if(!S.zoomCaps) return false; try{ Native.setZoom(z); S.camZoom=z; return true; }catch{ return false; } }
   const tr=vtrack(); if(!tr||!S.zoomCaps) return false;
   try{ await tr.applyConstraints({advanced:[{zoom:z}]}); S.camZoom=(tr.getSettings().zoom)||z; return true; }catch{ return false; }
 }
@@ -1000,7 +1133,7 @@ function renderLenses(){
 }
 
 /* ---------- Find the shot ---------- */
-function srcEl(){ return S.mode==="live"?video:S.mode==="photo"?still:null; }
+function srcEl(){ return S.mode==="live"?liveEl():S.mode==="photo"?still:null; }
 async function findShot(){
   if(S.busy) return; const el=srcEl(); if(!el||!S.src.w) return;
   await resetView();
@@ -1010,23 +1143,39 @@ async function findShot(){
     // the scene is measured at this moment; movement is tracked from here
     const {w,h}=S.src, k=Math.min(1,1024/Math.max(w,h));
     const snap=document.createElement("canvas"); snap.width=Math.round(w*k); snap.height=Math.round(h*k);
-    snap.getContext("2d").drawImage(el,0,0,snap.width,snap.height); vtReset();
+    const hi = NATIVE && S.mode==="live" ? await nativeImage(1024) : null;   // the app hands over a sharp frame
+    snap.getContext("2d").drawImage(hi||el,0,0,snap.width,snap.height); vtReset();
     const FW=Math.max(16,Math.round(w*160/Math.max(w,h))), FH=Math.max(16,Math.round(h*160/Math.max(w,h)));
     const nsP = S.set.neural ? neuralSal(snap,FW,FH).catch(()=>null) : Promise.resolve(null);
     const t0=performance.now();
     const eng=engine(); let plan=null, who="";
+    if(eng==="gemini") maybeRecheck();
     if(eng==="gemini"){
-      if(G.state==="down"||G.state==="badkey") S.note=(G.state==="down"?"Gemini em baixo.":"Chave do Gemini inválida.")+" Usei o motor local.";
+      if(G.state==="quota") S.note="Quota do Gemini esgotada.";
+      else if(G.state==="down"||G.state==="badkey") S.note=(G.state==="down"?"Gemini em baixo.":"Chave do Gemini inválida.");
       else {
-        const b64=snap.toDataURL("image/jpeg",.85).split(",")[1], prompt=PROMPT(snap.width,snap.height); let last=null;
+        const b64=snap.toDataURL("image/jpeg",.85).split(",")[1], prompt=PROMPT(snap.width,snap.height); let last=null, q=0, n=0;
         for(const m of modelOrder()){
           if(geminiPaused(m)){ last={code:"g_paused"}; continue; }
+          n++;
           try{ plan=fromAI(parseJSON(await askGemini(b64,prompt,m))); who=m.replace("gemini-",""); if(G.state!=="up"||G.model!==m) setHealth("up",m,""); break; }
-          catch(e){ last=e; if(fatalKey(e)){ setHealth("badkey","",errCopy(e)); break; } }
+          catch(e){ last=e; if(e&&e.code==="g_429") q++; if(fatalKey(e)){ setHealth("badkey","",errCopy(e)); break; } }
         }
-        if(!plan){ if(G.state!=="badkey") setHealth("down","",errCopy(last)); S.note=errCopy(last)+" Usei o motor local."; }
+        if(!plan){
+          G.at=Date.now();
+          if(q && q===n) setQuota(errCopy(last)); else if(G.state!=="badkey") setHealth("down","",errCopy(last));
+          S.note=errCopy(last);
+        }
       }
-    } else if(eng==="claude"){
+    }
+    // Gemini Nano, on the phone: chosen directly, or when the cloud fails
+    if(!plan && eng==="nano" && !nanoReady()) S.note="Gemini Nano "+({downloadable:"por descarregar (Definições)",downloading:"ainda a descarregar",unavailable:"não disponível"}[nanoState()]||"indisponível")+".";
+    if(!plan && (eng==="nano" || eng==="gemini") && nanoReady()){
+      try{ setMsg("O Gemini Nano está a ver a cena…"); plan=fromAI(parseJSON(await askNano(snap.toDataURL("image/jpeg",.85).split(",")[1], PROMPT(snap.width,snap.height)))); who="nano"; S.note=""; }
+      catch(e){ S.note=(S.note?S.note+" ":"")+errCopy(e); }
+    }
+    if(!plan && S.note && !/IA local/.test(S.note)) S.note+=" Usei a IA local.";
+    if(eng==="claude"){
       try{ const blob=await new Promise(r=>snap.toBlob(r,"image/jpeg",.85)); plan=fromAI(parseJSON(await askClaude(blob,PROMPT(snap.width,snap.height)))); who="claude"; }
       catch(e){ S.note=errCopy(e)+" Usei o motor local."; }
     }
@@ -1037,7 +1186,7 @@ async function findShot(){
     if(!plan){
       if(!detReady) setMsg("A preparar o detetor (só na primeira vez)…");
       let subj=null; try{ subj=await detectLocal(el,null); }catch{}
-      plan={subj, shot:null, rule:"tercos", tip:""};
+      plan={subj, shot:null, rule:localLook().styles[0], tip:""};
       if(S.set.neural){ try{ pick=await within(nimaPick(F,snap,subj),6000); }catch{} if(pick) plan.rule=pick.st; }
       who = pick ? "local+ · nota "+pick.n.toFixed(1) : NS ? "local+" : "local";
     }
@@ -1048,11 +1197,12 @@ async function findShot(){
     const c=(pick&&pick.c)||planCrop(F,plan); S.frame=toFrame(c,F);
     S.seen.push(plan.subj?plan.subj.name:"zona "+Math.round(S.frame.x)+","+Math.round(S.frame.y));
     S.phase = S.mode==="live" ? "guide" : "locked";
-    if(S.mode==="photo") setMsg(S.tip,"ok");
+    if(S.mode==="photo"){ setMsg(S.tip,"ok"); S.lockAt=performance.now(); setTimeout(refineShot,0); }
   }catch(e){ S.phase="idle"; setMsg(errCopy(e),"err"); }
   finally{ S.busy=false; $("#scan").hidden=true; ui(); }
 }
 async function lock(){
+  if(NATIVE && S.mode==="live" && S.zoomCaps) return nativeLock();
   // The crop stays exactly where the frame was. The preview zooms into that same crop,
   // so what you see is what gets saved. (A real lens switch shifted the centre on some phones.)
   const f=curFrame(), w=Math.min(f.w,S.src.w), h=Math.min(f.h,S.src.h);
@@ -1060,9 +1210,60 @@ async function lock(){
   S.frame={x:cl(f.x,0,S.src.w-w), y:cl(f.y,0,S.src.h-h), w, h};
   vtReset(); S.phase="locked"; S.cssZoom=true; S.lockAt=performance.now();
   setMsg(S.tip||"Enquadrado. Tira a foto.","ok"); ui();
+  setTimeout(refineShot,750);   // after the zoom animation
+}
+/* In the app: zoom with the real lenses until the frame fills the view, then refine with the new detail. */
+async function nativeLock(){
+  const f=curFrame(); if(!f) return;
+  S.phase="lock"; S.alignedSince=0; setMsg("A aproximar com a lente…","ok"); ui();
+  const L=layout(), vw=L.VW/L.s, vh=L.VH/L.s;   // the part of the camera image the stage shows
+  const z0=S.camZoom||1, k=Math.min(vw/f.w, vh/f.h)*.9;
+  const zt=cl(z0*k, S.zoomCaps.min, S.zoomCaps.max), zr=zt/z0;
+  await applyZoom(zt);
+  const seq=nvSeq, t0=performance.now();
+  while(nvSeq<seq+6 && performance.now()-t0<1500) await sleep(50);   // let the lens settle
+  if(S.phase!=="lock") return;
+  const cx=S.src.w/2, cy=S.src.h/2;
+  let w=Math.min(vw, f.w*zr), h=w/S.ratio; if(h>vh){ h=vh; w=h*S.ratio; }
+  const ncx=cx+(f.x+f.w/2-cx)*zr, ncy=cy+(f.y+f.h/2-cy)*zr;
+  S.frame={x:cl(ncx-w/2,0,S.src.w-w), y:cl(ncy-h/2,0,S.src.h-h), w, h};
+  vtReset(); S.phase="locked"; S.lockAt=performance.now();
+  setMsg(S.tip||"Enquadrado. Tira a foto.","ok"); ui();
+  refineShot();
+}
+/* Second pass, inside the chosen area: with more detail, nudge the frame (≤ ~10% move, ±10% size) if NIMA likes it clearly better. */
+async function refineShot(){
+  if(!S.set.neural || S.phase!=="locked" || !S.frame) return;
+  const token=S.lockAt, f={...S.frame}, {w:SW,h:SH}=S.src;
+  const rw=Math.min(SW,f.w*1.5), rh=Math.min(SH,f.h*1.5);
+  const rx=cl(f.x+f.w/2-rw/2,0,SW-rw), ry=cl(f.y+f.h/2-rh/2,0,SH-rh);
+  try{
+    let src=srcEl(); if(NATIVE && S.mode==="live"){ const im=await nativeImage(1600); if(im) src=im; }
+    const iw=src.naturalWidth||src.videoWidth||src.width, kk=iw/SW;
+    const ss=Math.min(kk, 768/Math.max(rw,rh));            // snap pixels per view pixel
+    const snap=document.createElement("canvas"); snap.width=Math.max(16,Math.round(rw*ss)); snap.height=Math.max(16,Math.round(rh*ss));
+    snap.getContext("2d").drawImage(src,rx*kk,ry*kk,rw*kk,rh*kk,0,0,snap.width,snap.height);
+    const FW=Math.max(16,Math.round(rw*160/Math.max(rw,rh))), FH=Math.max(16,Math.round(rh*160/Math.max(rw,rh)));
+    const NS=await within(neuralSal(snap,FW,FH).catch(()=>null),5000);
+    if(S.lockAt!==token || S.phase!=="locked") return;
+    const F=features(snap,NS,{w:rw,h:rh}), k=F.W/rw;
+    const cur={x0:Math.round((f.x-rx)*k), y0:Math.round((f.y-ry)*k), cw:Math.round(f.w*k), ch:Math.round(f.h*k)};
+    const maxH=Math.min(F.H,F.W/S.ratio), s0=cur.ch/maxH;
+    const c=bestCrop(F,null,S.ratio,S.style||"tercos",{scales:[s0*.9,s0,s0*1.1].map(v=>cl(v,.2,1)),center:{x:cur.x0+cur.cw/2,y:cur.y0+cur.ch/2},radius:.06});
+    if(!c) return;
+    const moved=Math.hypot(c.x0+c.cw/2-cur.x0-cur.cw/2, c.y0+c.ch/2-cur.y0-cur.ch/2)/F.W + Math.abs(c.cw/cur.cw-1);
+    if(moved<.02) return;
+    const q=ss/k;   // snap pixels per F pixel
+    const n0=await nimaScore(snap,cur.x0*q,cur.y0*q,cur.cw*q,cur.ch*q), n1=await nimaScore(snap,c.x0*q,c.y0*q,c.cw*q,c.ch*q);
+    if(S.lockAt!==token || S.phase!=="locked" || !(n1>n0+.1)) return;
+    let w=c.cw/k, h=w/S.ratio; if(h>SH){ h=SH; w=h*S.ratio; }
+    S.refFrom=f; S.refAt=performance.now();
+    S.frame={x:cl(rx+c.x0/k,0,SW-w), y:cl(ry+c.y0/k,0,SH-h), w, h};
+    S.note=(S.note?S.note+" · ":"")+"afinado ("+n0.toFixed(1)+"→"+n1.toFixed(1)+")"; ui();
+  }catch{}
 }
 async function resetView(){
-  S.cssZoom=false; video.style.transform=""; S.alignedSince=0; S.lockRem=0;
+  S.cssZoom=false; video.style.transform=""; S.alignedSince=0; S.lockRem=0; S.refAt=0; S.refFrom=null; S.lockAt=0;
   if(S.mode==="live" && S.zoomCaps && Math.abs(S.camZoom-S.homeZoom)>.01) await applyZoom(S.homeZoom);
 }
 async function clearShot(){
@@ -1176,7 +1377,12 @@ async function capture(){
   if(!f){ const w=Math.min(SW,SH*S.ratio), h=w/S.ratio; f={x:(SW-w)/2,y:(SH-h)/2,w,h}; }
   const w=Math.min(f.w,SW), h=Math.min(f.h,SH), x=cl(f.x,0,SW-w), y=cl(f.y,0,SH-h);
   let c=null;
-  if(S.mode==="live" && S.set.fullres){
+  if(S.mode==="live" && NATIVE){
+    S.capturing=true; shutter.disabled=true; setMsg("A tirar a foto…","ok");
+    try{ c=await nativePhoto({x:x/SW,y:y/SH,w:w/SW,h:h/SH}); }catch{ c=null; }
+    S.capturing=false; shutter.disabled=false; S.fullres=!!c;
+    if(!c) setMsg("A câmara não devolveu a foto; usei a imagem do visor.","err");
+  } else if(S.mode==="live" && S.set.fullres){
     S.capturing=true; shutter.disabled=true; setMsg("A tirar a foto em resolução total…","ok");
     try{ c=await fullResCrop({x,y,w,h}); }catch{ c=null; }
     S.capturing=false; shutter.disabled=false;
@@ -1364,6 +1570,12 @@ async function save(){
   const out=$("#out"); const blob=await new Promise(r=>out.toBlob(r,"image/jpeg",.92));
   const d=new Date(), p=n=>String(n).padStart(2,"0");
   const name=`enquadra-${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.jpg`;
+  if(NATIVE){
+    const b64=await new Promise(r=>{ const fr=new FileReader(); fr.onload=()=>r(String(fr.result).split(",")[1]); fr.onerror=()=>r(""); fr.readAsDataURL(blob); });
+    let ok=""; try{ ok=Native.saveJpeg(name,b64); }catch{}
+    if(ok==="ok"){ setMsg("Guardada na galeria (Imagens › Enquadra).","ok"); stepBack(); } else setMsg("Não consegui guardar a foto.","err");
+    return;
+  }
   if(dl){
     try{ await dl.save({filename:name,data:blob}); setMsg("Foto guardada.","ok"); stepBack(); }
     catch(e){ if(e&&e.code!=="cancelled"&&e.code!=="declined") setMsg("Não consegui guardar a foto.","err"); }
@@ -1445,8 +1657,10 @@ function rr(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,
 const AMBER="#f5c531", GREEN="#7bd88f";
 function draw(){
   requestAnimationFrame(draw);
-  if(S.mode==="live" && video.videoWidth) S.src={w:video.videoWidth,h:video.videoHeight};
-  if(tracking() && video.videoWidth){ const now=performance.now(); if(!VT.t||now-VT.t>30){ VT.t=now; try{ vtStep(video,video.videoWidth,video.videoHeight); }catch{} } }
+  syncPreview();
+  if(S.mode==="live" && liveW()) S.src={w:liveW(),h:liveH()};
+  if(tracking() && liveW()){ const now=performance.now();
+    if(NATIVE ? VT.seq!==nvSeq : (!VT.t||now-VT.t>30)){ VT.t=now; VT.seq=nvSeq; try{ vtStep(liveEl(),liveW(),liveH()); }catch{} } }
   const dpr=window.devicePixelRatio||1, L=layout();
   if(ov.width!==Math.round(L.VW*dpr)||ov.height!==Math.round(L.VH*dpr)){ ov.width=Math.round(L.VW*dpr); ov.height=Math.round(L.VH*dpr); }
   ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,L.VW,L.VH);
@@ -1598,10 +1812,12 @@ $("#btnCopyLink").onclick=async()=>{
 $("#persona").addEventListener("change",e=>{ S.set.persona=e.target.value; store.set("persona",S.set.persona); });
 $("#extra").addEventListener("change",e=>{ S.set.extra=e.target.value.trim(); store.set("extra",S.set.extra); });
 $("#fullres").addEventListener("change",e=>{ S.set.fullres=e.target.checked; store.set("fullres",S.set.fullres); });
-$("#btnSet").onclick=()=>{ $("#gkey").value=S.set.gkey; $("#gmodel").value=S.set.gmodel; $("#testOut").textContent=""; $("#shareLink").value=testerLink(); $("#copyOut").textContent=""; $("#fullres").checked=S.set.fullres; $("#persona").value=S.set.persona; $("#extra").value=S.set.extra; $("#neural").checked=S.set.neural; renderEngine(); setHealth(G.state,G.model,null); $("#settings").hidden=false; pushLayer("settings"); };
+$("#btnSet").onclick=()=>{ $("#gkey").value=S.set.gkey; $("#gmodel").value=S.set.gmodel; $("#testOut").textContent=""; $("#shareLink").value=testerLink(); $("#copyOut").textContent=""; $("#fullres").checked=S.set.fullres; $("#persona").value=S.set.persona; $("#extra").value=S.set.extra; $("#neural").checked=S.set.neural; renderEngine(); setHealth(G.state,G.model,null); renderNano(); $("#settings").hidden=false; pushLayer("settings"); };
 $("#btnSetClose").onclick=stepBack;
 $("#gkey").addEventListener("change",e=>{ S.set.gkey=e.target.value.trim(); store.set("gkey",S.set.gkey); renderEngine(); checkGemini(); });
-$("#engChip").onclick=()=>{ if(S.set.gkey){ setMsg(G.why && G.state!=="up" ? "Último erro:\n"+G.why+"\nA verificar outra vez…" : "A verificar o Gemini…"); checkGemini().then(()=>{ if(G.state==="up") setMsg("Gemini a responder ("+G.model+")."); else if(G.why) setMsg("Gemini indisponível:\n"+G.why,"err"); }); } };
+$("#engChip").onclick=()=>{ if(G.state==="quota" && Date.now()<G.until){ setMsg(G.why,"err"); return; } if(S.set.gkey && engine()==="gemini"){ setMsg(G.why && G.state!=="up" ? "Último erro:\n"+G.why+"\nA verificar outra vez…" : "A verificar o Gemini…"); checkGemini().then(()=>{ if(G.state==="up") setMsg("Gemini a responder ("+G.model+")."); else if(G.why) setMsg("Gemini indisponível:\n"+G.why,"err"); }); } };
+if(NATIVE){ const o=document.createElement("option"); o.value="nano"; o.textContent="Só Gemini Nano (no telemóvel, sem quota)"; $("#engineSel").appendChild(o); }
+$("#btnNano").onclick=()=>{ try{ Native.nanoDownload(); }catch{} $("#nanoTxt").textContent="Gemini Nano: a pedir a descarga ao sistema…"; $("#btnNano").hidden=true; };
 $("#engineSel").addEventListener("change",e=>{ S.set.engine=e.target.value; store.set("engine",S.set.engine); renderEngine(); checkGemini(); });
 $("#neural").addEventListener("change",async e=>{
   S.set.neural=e.target.checked; store.set("neural",S.set.neural); renderEngine();
@@ -1626,7 +1842,7 @@ $("#btnTest").onclick=async()=>{
   try{ history.replaceState(null,"",location.pathname+location.search); }catch{}
 })();
 renderEngine(); ui(); initRuntime(); refreshThumb(); requestAnimationFrame(draw);
-checkGemini();
+if(!(G.state==="quota" && Date.now()<G.until)) checkGemini(); else renderEngine();
 setTimeout(()=>{ if(S.set.neural){ loadModel("u2netp.onnx").catch(()=>{}); loadModel("nima.onnx").catch(()=>{}); } }, 4000);   // get the local models ready in the background
 startLive();
 })();
