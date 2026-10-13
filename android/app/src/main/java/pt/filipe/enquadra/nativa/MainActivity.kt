@@ -58,6 +58,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private val seen = ArrayList<String>()
     private var zoomed = false; private var lockAt = 0L; private var alignedSince = 0L
     private var homeZoom = 1f
+    private val LENS_FILL = .9        // after the lens change the frame fills 90% of the view (room for a shaky hand)
     private var roll = 0.0; private var levelValid = false
     private var grid = true; private var levelOn = true
     private var lastMatch = ""
@@ -250,7 +251,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             fun wait() {
                 if (cam.srcW > 0) {
                     mode = "live"; phase = "idle"; frame = null
-                    homeZoom = 1f.coerceIn(cam.minZoom, cam.maxZoom); cam.setZoom(homeZoom)
+                    homeZoom = cam.minZoom; cam.setZoom(homeZoom)   // like Framed: start on the widest lens, the AI sees more
                     setMsg("Aponta e toca em ✦ para encontrar a foto.", "dim"); ui()
                 } else if (SystemClock.uptimeMillis() - t0 > 10000) showNoCam("A câmara não arrancou (${cam.lastError.ifEmpty { "sem imagens" }}).")
                 else pv.postDelayed({ wait() }, 50)
@@ -264,6 +265,10 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         if (mx <= mn) return emptyList()
         return listOf(mn, 1f, 2f, 3f, 5f).filter { it >= mn - 1e-6 && it <= mx + 1e-6 }.map { (it * 100).roundToInt() / 100f }.distinct().sorted()
     }
+    /** The phone's real lenses (S26 Ultra: 1x, 3x, 5x); zooms between them are digital crops. */
+    private fun lensStops(): List<Double> = listOf(1.0, 3.0, 5.0).filter { it >= cam.minZoom - 1e-3 && it <= cam.maxZoom + 1e-3 }
+    private fun fmtZ(z: Double) = if (abs(z - z.roundToInt()) < .05) "${z.roundToInt()}×" else "%.1f×".format(z)
+
     private fun renderLenses() {
         lenses.removeAllViews()
         if (mode != "live" || phase != "idle") return
@@ -540,14 +545,26 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 if (pl == null) { pl = Plan(null, null, look.styles[seen.size % look.styles.size], ""); who = "local" }
                 val plan0 = pl!!
                 val (fw, fh) = featureSize(srcW, srcH)
+                val z0 = cam.zoom; val stops = lensStops()
+                var lensTxt = ""
                 val c = withContext(Dispatchers.Default) {
                     val small = Bitmap.createScaledBitmap(snap, fw, fh, true); val px = IntArray(fw * fh); small.getPixels(px, 0, fw, 0, 0, fw, fh)
                     val F = features(px, fw, fh, null)
-                    val cr = planCrop(F, plan0, srcW, srcH, ratio, gem.persona().range, look.scales)
+                    var cr = planCrop(F, plan0, srcW, srcH, ratio, gem.persona().range, look.scales)
+                    // The size of the frame comes from a real lens: the zoom it needs is snapped to 1x, 3x or 5x,
+                    // so the photo is taken by that lens at full resolution and never by a digital crop in between.
+                    if (cr != null && stops.isNotEmpty()) {
+                        val maxH = min(F.H.toDouble(), F.W / ratio); val s0 = cr.ch / maxH
+                        val zRaw = z0 * LENS_FILL / s0
+                        val L = stops.minByOrNull { abs(ln(it / zRaw)) }!!
+                        val s = (z0 * LENS_FILL / L).coerceIn(.06, 1.0)
+                        lensTxt = "lente ${fmtZ(L)}"
+                        if (abs(s / s0 - 1) > .03) cr = bestCrop(F, plan0.subj, ratio, plan0.rule, CropOpt(listOf(s), cr.x0 + cr.cw / 2.0, cr.y0 + cr.ch / 2.0, .06)) ?: cr
+                    }
                     cr?.let { toFrame(it, F, srcW, srcH, ratio) }
                 } ?: throw GErr("no_crop")
                 val dt = "%.1f".format((SystemClock.uptimeMillis() - t0) / 1000.0)
-                note = (if (note.isNotEmpty()) "$note  " else "") + "$who · $dt s"
+                note = (if (note.isNotEmpty()) "$note  " else "") + "$who · $dt s" + (if (lensTxt.isNotEmpty()) " · $lensTxt" else "")"
                 if (phase != "scan") return@launch     // cancelled meanwhile
                 plan = plan0; subj = plan0.subj; style = plan0.rule; tip = plan0.tip.ifEmpty { LOCAL_TIP[plan0.rule] ?: "" }
                 label = plan0.name.ifEmpty { plan0.subj?.name ?: "" }
@@ -579,8 +596,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private suspend fun opticalSwitch(token: Long) {
         val f = frame ?: return
         val sw = cam.srcW.toDouble(); val sh = cam.srcH.toDouble()
-        val z0 = cam.zoom; val k = min(sw / f.w, sh / f.h) * .9
-        val zt = (z0 * k).toFloat().coerceIn(cam.minZoom, cam.maxZoom); val zr = zt / z0
+        val z0 = cam.zoom; val k = min(sw / f.w, sh / f.h) * LENS_FILL
+        var zt = (z0 * k).toFloat().coerceIn(cam.minZoom, cam.maxZoom)
+        // land exactly on the real lens (2.98x would still be a crop of the main camera)
+        lensStops().minByOrNull { abs(ln(it / zt)) }?.let { if (abs(ln(it / zt)) < .12) zt = it.toFloat() }
+        val zr = zt / z0
         if (zr < 1.25f) { lastMatch = "sem troca de lente (zoom ${"%.1f".format(zt)}×)"; return }
         val g0 = hiGray(320) ?: return
         if (phase != "locked" || lockAt != token) return
