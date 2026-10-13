@@ -37,3 +37,4 @@ adb logcat -d -v brief > $OUT/logcat.txt
 grep -E "FATAL|AndroidRuntime|Enquadra|CameraX|Camera2CameraImpl.*(ERROR|error)" $OUT/logcat.txt | head -80 > $OUT/resumo.txt
 adb shell run-as $PKG cat files/crash.txt > $OUT/crash.txt 2>/dev/null || true
 exit 0
+# v5

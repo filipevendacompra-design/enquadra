@@ -376,6 +376,14 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             var ease = 0f
             if (phase == "locked" || phase == "lock") { val tt = ((now - lockAt) / 700f).coerceIn(0f, 1f); ease = if (tt < .5f) 4 * tt * tt * tt else 1 - (-2 * tt + 2).pow(3) / 2 }
             if (phase == "guide" && mode == "live") driveZoom(dist / tsS.toFloat(), tol, now)
+            if (phase == "locked" && lockTrackUntil > 0) {
+                // finish the zoom gently on the lens; keep following until it has landed
+                val dt = (now - zgT).coerceIn(0, 100); zgT = now
+                zS += (targetZoom - zS) * (1 - exp(-dt / 220.0))
+                if (abs(zS / targetZoom - 1) < .004) zS = targetZoom
+                if (abs(zS / lastCmd - 1) > .004 && now - lastCmdT > 40 || (zS == targetZoom && lastCmd != targetZoom)) { cam.setZoom(zS.toFloat()); lastCmd = zS; lastCmdT = now }
+                if (zS != targetZoom) lockTrackUntil = now + 500
+            }
             if (phase == "locked" && lockTrackUntil > 0 && now >= lockTrackUntil) {
                 // the zoom has settled on the lens: the frame stops following and stays put, as in the web version
                 trackedFrame()?.let { t -> val sw = cam.srcW.toDouble(); val sh = cam.srcH.toDouble(); val w = min(t.w, sw); val h = min(t.h, sh)
@@ -624,8 +632,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private fun lock() {
         if (curFrame() == null) return
         phase = "locked"; zoomed = false; lockAt = SystemClock.uptimeMillis(); alignedSince = 0
-        cam.setZoom(targetZoom.toFloat()); lastCmd = targetZoom; zS = targetZoom
-        lockTrackUntil = lockAt + 900      // keep following while the zoom lands on the lens
+        lockTrackUntil = lockAt + 500      // keep following while the zoom lands on the lens (extended until it has)
         lastMatch = "zoom real até ${fmtZ(targetZoom)}"
         setMsg(tip.ifEmpty { "Enquadrado. Tira a foto." }, "ok"); ui()
     }

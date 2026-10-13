@@ -101,13 +101,15 @@ class Tracker {
      * One new frame. Called on the camera thread. zoomStep: how much the camera zoom changed since the previous frame
      * (as far as we know; the real value is searched around it, because frames lag the zoom command).
      */
-    fun step(cur: Gray, zoomStep: Double = 1.0) {
+    fun step(cur: Gray, zoomStep: Double = 1.0, zoomTotal: Double = 1.0) {
         if (resetPending) { resetPending = false; dx = 0.0; dy = 0.0; S = 1.0; lost = 0; prev = cur; return }
         val p = prev; prev = cur
         if (p == null || p.W != cur.W || p.H != cur.H) return
         var best: Match? = null; var bs = 1.0
-        val cands = if (abs(zoomStep - 1) < .004 && abs(lastScale - 1) < .004) doubleArrayOf(1.0)
-            else (doubleArrayOf(1.0, zoomStep, lastScale, 1 + (zoomStep - 1) * .5, 1 + (zoomStep - 1) * 1.5)).distinct().toDoubleArray()
+        // the zoom still owed: what the camera says minus what the image has shown so far (frames lag the command)
+        val owed = (zoomTotal / S).coerceIn(.7, 1.45)
+        val cands = if (abs(zoomStep - 1) < .004 && abs(lastScale - 1) < .004 && abs(owed - 1) < .004) doubleArrayOf(1.0)
+            else doubleArrayOf(1.0, zoomStep, lastScale, owed, 1 + (owed - 1) * .5, 1 + (zoomStep - 1) * 1.5).filter { it in .6..1.6 }.distinct().toDoubleArray()
         for (s in cands) {
             val m = (if (abs(s - 1) < 1e-4) measure(p, cur) else measure(warp(p, s), cur)) ?: continue
             if (best == null || m.err < best.err - .05) { best = m; bs = s }
