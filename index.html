@@ -74,15 +74,15 @@ svg{display:block}
 .ai.busy{color:var(--fg)}
 .ai:disabled{opacity:.35}
 
-.sheet{position:fixed;inset:0;background:var(--ink);z-index:10;display:grid;gap:12px;padding:calc(10px + env(safe-area-inset-top,0px)) 16px calc(14px + env(safe-area-inset-bottom,0px))}
+.sheet{position:fixed;inset:0;background:var(--ink);z-index:10;display:grid;grid-template-columns:minmax(0,1fr);gap:12px;padding:calc(10px + env(safe-area-inset-top,0px)) 16px calc(14px + env(safe-area-inset-bottom,0px))}
 #result{grid-template-rows:auto minmax(0,1fr) auto auto auto;z-index:12}
 #gallery{grid-template-rows:auto minmax(0,1fr) auto;z-index:11}
 #settings{grid-template-rows:auto minmax(0,1fr);z-index:13}
 .sheet header{display:flex;align-items:center;gap:10px;min-height:40px}
 .sheet h2{margin:0;font-size:17px;font-weight:600;flex:1}
 .res-info{flex:1;text-align:center;font:11px var(--f-mono);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.preview{display:grid;place-items:center;min-height:0}
-#out{max-width:100%;max-height:100%;box-shadow:0 10px 40px rgba(0,0,0,.6)}
+.preview{position:relative;min-height:0;overflow:hidden}
+#out{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
 .strip{display:flex;gap:10px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none}
 .strip::-webkit-scrollbar{display:none}
 .fbtn{flex:none;display:grid;gap:5px;justify-items:center;font:500 10px var(--f-mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
@@ -271,7 +271,7 @@ function renderEngine(){
 const PROMPT = (w,h) => {
   const avoid = S.seen.length ? `\nThe user asked for another option: choose something different from ${S.seen.slice(-4).map(x=>`"${x}"`).join(", ")}.` : "";
   return `You are a photo director helping someone take a striking phone photo. The image is the live camera view (${w>h?"landscape":"portrait"}, ${w}x${h}).
-Pick ONE subject in it that would make the most beautiful photo when isolated with a moderate telephoto (about 2x zoom). Favour: light (sun, golden light, glowing windows, light through leaves), reflections, silhouettes, strong shapes, one isolated object, textures, leading lines that end in something. Avoid: things cut by the image edge, bare lamps and glare, clutter, plain empty sky.
+Pick ONE subject in it that would make the most beautiful photo when isolated with a moderate telephoto (about 2x zoom). Favour: light (sun, golden light, glowing windows, light through leaves), reflections, silhouettes, strong shapes, one isolated object, textures, leading lines that end in something. Avoid: things cut by the image edge, clutter, plain empty sky. Never pick a lamp, street light or light bulb as the subject; choose what the light falls on, its glow on a surface, or its reflection, and keep bright lamps away from the edges of the shot. The sun at sunset is fine.
 Then propose the shot: a rectangle with width:height = ${S.ratio.toFixed(3)} that contains the subject, places it with a composition rule, and covers roughly 30-55% of the image width.${avoid}
 Answer with JSON only:
 {"subject":"short description in European Portuguese, max 4 words, lowercase","subject_box":[ymin,xmin,ymax,xmax],"shot_box":[ymin,xmin,ymax,xmax],"rule":"tercos|aurea|centro|simetrico|diagonal|minimal|moldura","tip":"short instruction in European Portuguese, max 6 words, e.g. 'Luz bonita, fica aí'"}
@@ -680,7 +680,12 @@ function trackOffset(){
   const k=S.src.w/(VT.prev?VT.prev.W:128);
   return {dx:VT.dx*k, dy:VT.dy*k};
 }
-function curFrame(){ const f=S.frame; if(!f) return null; const {dx,dy}=trackOffset(); return {x:f.x+dx,y:f.y+dy,w:f.w,h:f.h}; }
+function curFrame(){
+  if(S.mode==="live" && S.phase==="locked" && S.lockRem){   // centred, sized from the stream as it is now
+    const maxW=Math.min(S.src.w,S.src.h*S.ratio), w=maxW/S.lockRem, h=w/S.ratio;
+    return {x:(S.src.w-w)/2, y:(S.src.h-h)/2, w, h};
+  }
+  const f=S.frame; if(!f) return null; const {dx,dy}=trackOffset(); return {x:f.x+dx,y:f.y+dy,w:f.w,h:f.h}; }
 
 /* ---------- Level (gravity only) ---------- */
 let motionOn=false;
@@ -804,25 +809,23 @@ async function findShot(){
   }catch(e){ S.phase="idle"; setMsg(errCopy(e),"err"); }
   finally{ S.busy=false; $("#scan").hidden=true; ui(); }
 }
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function lock(){
   S.phase="lock"; S.frame=curFrame(); vtReset(); ui();
   setMsg("Centrado — a enquadrar…","ok");
-  const f=S.frame, need=Math.min(S.src.w/f.w, S.src.h/f.h);
+  const f=S.frame, maxW=Math.min(S.src.w,S.src.h*S.ratio), need=Math.max(1,maxW/f.w);
   let zr=1;
   if(S.zoomCaps){
     const before=S.camZoom, target=cl(before*need,S.zoomCaps.min,S.zoomCaps.max);
-    if(target>before*1.05 && await applyZoom(target)) zr=S.camZoom/before;
+    if(target>before*1.05 && await applyZoom(target)){ zr=S.camZoom/before; await sleep(450); }   // let the lens settle
   }
   if(S.phase!=="lock") return;
-  if(zr>1.01){
-    const cx=S.src.w/2+(f.x+f.w/2-S.src.w/2)*zr, cy=S.src.h/2+(f.y+f.h/2-S.src.h/2)*zr, w=f.w*zr, h=f.h*zr;
-    S.frame={x:cx-w/2,y:cy-h/2,w,h};
-  }
-  S.cssZoom = need/zr > 1.04;
+  S.lockRem=Math.max(1,need/zr); S.frame=null;
+  S.cssZoom = S.lockRem > 1.04;
   S.phase="locked"; setMsg(S.tip||"Enquadrado. Tira a foto.","ok"); ui();
 }
 async function resetView(){
-  S.cssZoom=false; video.style.transform=""; S.alignedSince=0;
+  S.cssZoom=false; video.style.transform=""; S.alignedSince=0; S.lockRem=0;
   if(S.mode==="live" && S.zoomCaps && Math.abs(S.camZoom-S.homeZoom)>.01) await applyZoom(S.homeZoom);
 }
 async function clearShot(){
@@ -1133,6 +1136,7 @@ function guides(fx,fy,fw,fh){   // the guide lines of the active rule, inside th
   else for(let i=1;i<3;i++){ ctx.moveTo(fx+fw*i/3,fy); ctx.lineTo(fx+fw*i/3,fy+fh); ctx.moveTo(fx,fy+fh*i/3); ctx.lineTo(fx+fw,fy+fh*i/3); }
 }
 
+function rrPath(x,y,w,h,r){ ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
 function rr(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
 const AMBER="#f5c531", GREEN="#7bd88f";
 function draw(){
@@ -1163,7 +1167,7 @@ function draw(){
     }
     const col = aligned ? GREEN : AMBER;
     ctx.save(); ctx.fillStyle = S.phase==="locked" ? "rgba(0,0,0,.72)" : "rgba(0,0,0,.38)";
-    ctx.beginPath(); ctx.rect(0,0,L.VW,L.VH); rr(fx,fy,fw,fh,16); ctx.fill("evenodd"); ctx.restore();
+    ctx.beginPath(); ctx.rect(0,0,L.VW,L.VH); rrPath(fx,fy,fw,fh,16); ctx.fill("evenodd"); ctx.restore();
     ctx.strokeStyle=aligned?"rgba(123,216,143,.4)":"rgba(245,197,49,.35)"; ctx.lineWidth=1; ctx.beginPath(); guides(fx,fy,fw,fh); ctx.stroke();
     ctx.strokeStyle=col; ctx.lineWidth=2.5; rr(fx,fy,fw,fh,16); ctx.stroke();
     if(S.phase==="guide"){
