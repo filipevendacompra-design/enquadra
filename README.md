@@ -1,2 +1,2 @@
 # enquadra
-app de enquadramento.
+app de  enquadramento.
