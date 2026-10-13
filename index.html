@@ -31,7 +31,7 @@ svg{display:block}
 .eng{font:11px var(--f-mono);color:var(--muted);display:flex;align-items:center;gap:6px}
 .eng b{width:7px;height:7px;border-radius:50%;background:var(--muted)}
 .eng.ai b{background:var(--amber)}
-.eng{cursor:pointer;pointer-events:auto}
+.eng{cursor:pointer;pointer-events:auto;white-space:nowrap}
 .eng.up b{background:#34c759}
 .eng.down b{background:#ff453a}
 .eng.wait b{background:var(--amber);animation:engp 1s ease-in-out infinite}
@@ -338,7 +338,7 @@ function engine(){
 function renderEngine(){
   const e=engine();
   const st=G.state, chipEl=$("#engChip");
-  $("#engTxt").textContent = e==="gemini" ? (st==="up"?"gemini":st==="down"?"gemini em baixo · local":st==="quota"?"quota esgotada · local":st==="badkey"?"chave inválida · local":"gemini…")
+  $("#engTxt").textContent = e==="gemini" ? (st==="up"?"gemini":st==="down"?"local · gemini ✕":st==="quota"?"local · sem quota":st==="badkey"?"local · chave ✕":"gemini…")
     : e==="nano" ? "nano" : e==="claude" ? "claude" : (S.set.neural?"local+":"local");
   const es=$("#engineSel"); if(es) es.value=S.set.engine;
   chipEl.classList.toggle("ai", e!=="local");
@@ -538,15 +538,21 @@ const MP="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const MODEL="https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite";
 const LABELS={person:"pessoa",boat:"barco",car:"carro",bicycle:"bicicleta",motorcycle:"mota",bus:"autocarro",truck:"camião",train:"comboio",airplane:"avião",bird:"pássaro",cat:"gato",dog:"cão",horse:"cavalo",cow:"vaca",sheep:"ovelha",bench:"banco",chair:"cadeira",couch:"sofá","potted plant":"planta",bottle:"garrafa",cup:"chávena","wine glass":"copo",bowl:"taça",pizza:"pizza",cake:"bolo",laptop:"portátil",book:"livro",clock:"relógio",vase:"jarra",umbrella:"guarda-chuva","traffic light":"semáforo","stop sign":"sinal stop",kite:"papagaio",surfboard:"prancha",skateboard:"skate"};
 const RELIABLE=new Set(["person","dog","cat","bird","horse","cow","sheep","car","boat","bicycle","motorcycle","bus","truck","train","airplane"]);
-let detP=null, detMode=null, detReady=false;
+let detP=null, detMode=null, detReady=false, detErr="";
 function loadDetector(){
   if(!detP) detP=(async()=>{
-    const v=await import(MP+"/vision_bundle.mjs");
-    const fs=await v.FilesetResolver.forVisionTasks(MP+"/wasm");
-    const opts=d=>({baseOptions:{modelAssetPath:MODEL,delegate:d},scoreThreshold:.3,maxResults:6,runningMode:"VIDEO"});
-    let det; try{ det=await v.ObjectDetector.createFromOptions(fs,opts("GPU")); }catch{ det=await v.ObjectDetector.createFromOptions(fs,opts("CPU")); }
-    detMode="VIDEO"; detReady=true; return det;
-  })().catch(()=>{ detP=null; throw {code:"local_load"}; });
+    // inside the app the detector ships with it (no download); in the browser it comes from the CDN
+    const inApp = typeof NATIVE!=="undefined" && NATIVE;
+    const base = inApp ? new URL("mediapipe/",location.href).href : MP+"/";
+    const model = inApp ? new URL("efficientdet_lite0.tflite",location.href).href : MODEL;
+    const v=await import(base+(inApp?"vision_bundle.js":"vision_bundle.mjs"));
+    const fs=await v.FilesetResolver.forVisionTasks(base+"wasm");
+    const opts=d=>({baseOptions:{modelAssetPath:model,delegate:d},scoreThreshold:.3,maxResults:6,runningMode:"VIDEO"});
+    let det;
+    if(inApp) det=await v.ObjectDetector.createFromOptions(fs,opts("CPU"));   // the GPU path is unreliable in the app's web view
+    else { try{ det=await v.ObjectDetector.createFromOptions(fs,opts("GPU")); }catch{ det=await v.ObjectDetector.createFromOptions(fs,opts("CPU")); } }
+    detMode="VIDEO"; detReady=true; detErr=""; return det;
+  })().catch(e=>{ detP=null; detErr=String((e&&e.message)||e).slice(0,80); throw {code:"local_load"}; });
   return detP;
 }
 async function detectLocal(el,prev){
@@ -1262,6 +1268,7 @@ async function findShot(){
     if(!plan){
       if(!detReady) setMsg("A preparar o detetor (só na primeira vez)…");
       let subj=null; try{ subj=await detectLocal(el,null); }catch{}
+      if(!subj && detErr) S.note=(S.note?S.note+" ":"")+"Detetor: "+detErr+".";
       plan={subj, shot:null, rule:localLook().styles[0], tip:""};
       if(S.set.neural){ try{ pick=await within(nimaPick(F,snap,subj),6000); }catch{} if(pick) plan.rule=pick.st; }
       who = pick ? "local+ · nota "+pick.n.toFixed(1) : NS ? "local+" : "local";
