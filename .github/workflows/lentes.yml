@@ -17,7 +17,10 @@ jobs:
           gradle-version: "8.11.1"
 
       - name: Criar o projeto Android
+        id: criar
         run: |
+          exec > >(tee -a "$GITHUB_WORKSPACE/passos.log") 2>&1
+          echo "== Criar projeto =="
           mkdir -p lentes/app/src/main/java/pt/filipe/lentes
           cd lentes
 
@@ -300,12 +303,23 @@ jobs:
           }
           EOF
 
-      - uses: android-actions/setup-android@v3
-
       - name: Instalar SDK Android
-        run: sdkmanager "platforms;android-35" "build-tools;34.0.0"
+        id: sdk
+        run: |
+          exec > >(tee -a "$GITHUB_WORKSPACE/passos.log") 2>&1
+          echo "== SDK =="
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          SDKM=$(command -v sdkmanager || ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)
+          echo "sdkmanager: ${SDKM:-não encontrado}"
+          ls "$ANDROID_HOME/platforms" "$ANDROID_HOME/build-tools" 2>&1 || true
+          if [ -n "$SDKM" ]; then
+            yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+            "$SDKM" "platforms;android-35" "build-tools;34.0.0" | tail -5 || echo "AVISO: sdkmanager falhou; o Gradle tenta instalar sozinho"
+          fi
+          echo "sdk.dir=$ANDROID_HOME" > lentes/local.properties
 
       - name: Compilar
+        id: compilar
         run: |
           set -o pipefail
           gradle -p lentes assembleDebug --no-daemon 2>&1 | tee build.log
@@ -315,13 +329,14 @@ jobs:
         run: |
           {
             echo "## Erro"
+            echo "criar=${{ steps.criar.outcome }} · sdk=${{ steps.sdk.outcome }} · compilar=${{ steps.compilar.outcome }}"
             echo '```'
+            [ -f passos.log ] && tail -40 passos.log
             if [ -f build.log ]; then
+              echo "--- compilação ---"
               grep -E "^e: |error:|What went wrong|Could not|FAILED" -A4 build.log | head -80
               echo "--- últimas linhas ---"
               tail -40 build.log
-            else
-              echo "Falhou antes da compilação (instalação do Java/Gradle/SDK)."
             fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
