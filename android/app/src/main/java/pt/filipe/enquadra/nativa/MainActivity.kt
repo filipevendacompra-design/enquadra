@@ -265,20 +265,41 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         if (mx <= mn) return emptyList()
         return listOf(mn, 1f, 2f, 3f, 5f).filter { it >= mn - 1e-6 && it <= mx + 1e-6 }.map { (it * 100).roundToInt() / 100f }.distinct().sorted()
     }
+    /** 3x unless the subject asks for 5x, or would not fit in a 3x frame (then 1x). */
+    private fun pickLens(zRaw: Double, stops: List<Double>, sj: Subj?, z0: Float, srcW: Double, srcH: Double): Double {
+        val has3 = stops.any { abs(it - 3) < .01 }; val has5 = stops.any { abs(it - 5) < .01 }
+        if (!has3) return stops.minByOrNull { abs(ln(it / zRaw)) }!!
+        if (has5 && zRaw > 4.2) return 5.0
+        if (sj != null) {
+            val maxW = min(srcW, srcH * ratio); val fw = z0 * LENS_FILL / 3.0 * maxW / srcW; val fh = fw * srcW / ratio / srcH
+            if (sj.box[2] > fw * .95 || sj.box[3] > fh * .95) return 1.0
+        }
+        return 3.0
+    }
     /** The phone's real lenses (S26 Ultra: 1x, 3x, 5x); zooms between them are digital crops. */
     private fun lensStops(): List<Double> = listOf(1.0, 3.0, 5.0).filter { it >= cam.minZoom - 1e-3 && it <= cam.maxZoom + 1e-3 }
     private fun fmtZ(z: Double) = if (abs(z - z.roundToInt()) < .05) "${z.roundToInt()}×" else "%.1f×".format(z)
 
+    private fun pillText(v: Double) = when {
+        v < .995 -> "%.1f".format(v).removePrefix("0").replace(",", ".")
+        abs(v - v.roundToInt()) < .05 -> v.roundToInt().toString()
+        else -> "%.1f".format(v).replace(",", ".")
+    } + "×"
     private fun renderLenses() {
         lenses.removeAllViews()
-        if (mode != "live" || phase != "idle") return
-        for (v in lensValues()) {
-            val on = abs(v - homeZoom) < .06
-            val t = text(11f, if (on) C.AMBER else C.FG, F.monoMed, (if (v < 1) v.toString().removePrefix("0") else if (v == v.roundToInt().toFloat()) v.roundToInt().toString() else v.toString()) + "×").apply {
+        if (mode != "live" || phase == "scan") return
+        val idle = phase == "idle"
+        val vals = lensValues()
+        val eff = if (idle) homeZoom.toDouble() else effZoom
+        val active = vals.lastOrNull { it <= eff + .05 } ?: vals.firstOrNull()
+        for (v in vals) {
+            val on = active != null && abs(v - active) < 1e-3
+            val label = if (on && !idle) pillText(eff) else pillText(v.toDouble())
+            val t = text(11f, if (on) C.AMBER else C.FG, F.monoMed, label).apply {
                 gravity = Gravity.CENTER; background = bg(if (on) C.RAISE else C.PANEL, dp(18))
-                setOnClickListener { homeZoom = v; cam.setZoom(v); renderLenses(); ui() }
+                if (idle) setOnClickListener { homeZoom = v; cam.setZoom(v); renderLenses(); ui() }
             }
-            lenses.addView(t, LinearLayout.LayoutParams(dpi(36), dpi(36)).apply { leftMargin = dpi(4); rightMargin = dpi(4) })
+            lenses.addView(t, LinearLayout.LayoutParams(if (on && !idle && label.length > 3) dpi(48) else dpi(36), dpi(36)).apply { leftMargin = dpi(4); rightMargin = dpi(4) })
         }
     }
 
@@ -318,6 +339,9 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private val easeScanB = PathInterpolator(.45f, 0f, .55f, 1f)
     private val easeScanS = PathInterpolator(.4f, 0f, .2f, 1f)
     private var lastTf = floatArrayOf(1f, 0f, 0f)
+    private var lockFrom = floatArrayOf(1f, 0f, 0f)
+    private var zG = 1f; private var zgT = 0L; private var guideDist0 = 0f
+    private var effZoom = 1.0; private var lastEffR = -1
 
     private fun applyTransform(z: Float, tx: Float, ty: Float) {
         if (abs(z - lastTf[0]) < 1e-4 && abs(tx - lastTf[1]) < .05 && abs(ty - lastTf[2]) < .05) return
@@ -347,14 +371,30 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 if (aligned) { if (alignedSince == 0L) alignedSince = now; if (now - alignedSince > 350) lock() } else alignedSince = 0
             } else aligned = phase == "locked" || phase == "lock"
             var ease = 0f
+            val ztL = min(L.VW / fw, L.VH / fh) * .92f; val txL = cx - (fx + fw / 2) * ztL; val tyL = cy - (fy + fh / 2) * ztL
             if (zm) {
+                // lock: glide from wherever the aiming zoom was to the frame filling the view
                 val tt = ((now - lockAt) / 700f).coerceIn(0f, 1f)
                 ease = if (tt < .5f) 4 * tt * tt * tt else 1 - (-2 * tt + 2).pow(3) / 2
-                val zt = min(L.VW / fw, L.VH / fh) * .92f; val z = 1 + (zt - 1) * ease
-                val tx = (cx - (fx + fw / 2) * zt) * ease; val ty = (cy - (fy + fh / 2) * zt) * ease
+                val a = lockFrom
+                val z = a[0] + (ztL - a[0]) * ease; val tx = a[1] + (txL - a[1]) * ease; val ty = a[2] + (tyL - a[2]) * ease
                 applyTransform(z, tx, ty)
                 fx = fx * z + tx; fy = fy * z + ty; fw *= z; fh *= z
-            }
+                effZoom = (camZoom * z).toDouble()
+            } else if (phase == "guide" && mode == "live") {
+                // aiming: the closer the frame gets to the centre, the more the view zooms in (as in Framed)
+                if (guideDist0 <= 0f) guideDist0 = max(dist, tol * 3)
+                val prog = (1 - (dist - tol) / (guideDist0 - tol)).coerceIn(0f, 1f)
+                val zWant = 1 + (ztL * .8f - 1).coerceAtLeast(0f) * prog.pow(1.6f)
+                val dt = (now - zgT).coerceIn(0, 100); zgT = now
+                zG += (zWant - zG) * (1 - exp(-dt / 160f))
+                val tx = cx * (1 - zG); val ty = cy * (1 - zG)
+                applyTransform(zG, tx, ty)
+                fx = fx * zG + tx; fy = fy * zG + ty; fw *= zG; fh *= zG
+                effZoom = (camZoom * zG).toDouble()
+            } else effZoom = camZoom.toDouble()
+            val effR = (effZoom * 10).roundToInt()
+            if (effR != lastEffR) { lastEffR = effR; renderLenses() }
             val col = if (aligned) C.LOCK else C.AMBER
             val r = 16 * d
             dimPath.reset(); dimPath.fillType = Path.FillType.EVEN_ODD
@@ -556,7 +596,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     if (cr != null && stops.isNotEmpty()) {
                         val maxH = min(F.H.toDouble(), F.W / ratio); val s0 = cr.ch / maxH
                         val zRaw = z0 * LENS_FILL / s0
-                        val L = stops.minByOrNull { abs(ln(it / zRaw)) }!!
+                        val L = pickLens(zRaw, stops, plan0.subj, z0, srcW, srcH)
                         val s = (z0 * LENS_FILL / L).coerceIn(.06, 1.0)
                         lensTxt = "lente ${fmtZ(L)}"
                         if (abs(s / s0 - 1) > .03) cr = bestCrop(F, plan0.subj, ratio, plan0.rule, CropOpt(listOf(s), cr.x0 + cr.cw / 2.0, cr.y0 + cr.ch / 2.0, .06)) ?: cr
@@ -582,6 +622,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         val sw = cam.srcW.toDouble(); val sh = cam.srcH.toDouble()
         val w = min(f.w, sw); val h = min(f.h, sh)
         frame = RectD(cl(f.x, 0.0, sw - w), cl(f.y, 0.0, sh - h), w, h)
+        lockFrom = lastTf.copyOf()
         cam.trackOn = false; phase = "locked"; zoomed = true; lockAt = SystemClock.uptimeMillis(); alignedSince = 0
         setMsg(tip.ifEmpty { "Enquadrado. Tira a foto." }, "ok"); ui()
         val token = lockAt
@@ -635,7 +676,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     }
 
     private fun resetView() {
-        zoomed = false; applyTransform(1f, 0f, 0f); alignedSince = 0; lockAt = 0
+        zoomed = false; applyTransform(1f, 0f, 0f); alignedSince = 0; lockAt = 0; zG = 1f; guideDist0 = 0f; zgT = 0; lastEffR = -1
         freeze.animate().cancel(); freeze.visibility = View.GONE; freeze.setImageDrawable(null)
         if (mode == "live" && abs(cam.zoom - homeZoom) > .01f) cam.setZoom(homeZoom)
     }

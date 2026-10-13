@@ -25,7 +25,7 @@ PY
 adb shell am start -n $PKG/.MainActivity --ez autolock true
 sleep 12; shot 1-aberto
 tap_desc "Encontrar a foto"; sleep 1.5; shot 2-a-procurar
-sleep 5.2; shot 3-quadrado
+sleep 4.6; shot 3-quadrado
 sleep 0.5; shot 3b-zoom
 sleep 1.2; shot 3c-lente
 sleep 3; shot 3d-lente-final
