@@ -506,6 +506,15 @@ function fromAI(res){
   const border=BORDERS.some(b=>b[0]===res.border)?res.border:null;
   return {subj, shot, rule, tip:String(res.tip||"").slice(0,60), filter, border};
 }
+/** Nano is good at saying what the photo is, weak at saying where: keep its words even without boxes. */
+function fromNano(res){
+  if(!res || typeof res!=="object") throw {code:"bad_json"};
+  let p; try{ p=fromAI(res); }catch{ p={subj:null, shot:null, rule:STYLE_IDS.includes(res.rule)?res.rule:"tercos", tip:String(res.tip||"").slice(0,60),
+    filter:FILTERS.some(f=>f[0]===res.filter)?res.filter:null, border:BORDERS.some(b=>b[0]===res.border)?res.border:null}; }
+  p.name=String(res.subject||"").toLowerCase().slice(0,36); p.byNano=true;
+  if(!p.name && !p.tip) throw {code:"bad_json"};
+  return p;
+}
 function errCopy(e){
   const c=(e&&e.code)||"", m=((e&&e.msg)||"").toLowerCase();
   if(c==="g_net") return "Sem ligação ao Gemini.";
@@ -1007,6 +1016,7 @@ window.addEventListener("popstate",closeTop);
 /* ---------- Inside the Android app: native camera under the page ---------- */
 const NATIVE=!!(window.Native && typeof window.Native.info==="function");
 if(NATIVE){ document.documentElement.classList.add("native"); document.body.classList.add("native"); }
+let NCAM=NATIVE;   // native camera in use; falls back to the browser camera if it fails
 const nvc=document.createElement("canvas"); let nvSeq=0, nvBusy=false, camErr="";
 window.__camError=m=>{ camErr=String(m||"erro desconhecido"); };
 window.__nf=(url,z)=>{   // a small live frame from the native camera (~12 per second)
@@ -1017,9 +1027,9 @@ window.__nf=(url,z)=>{   // a small live frame from the native camera (~12 per s
   im.onerror=()=>{ nvBusy=false; };
   im.src=url;
 };
-function liveEl(){ return NATIVE ? nvc : video; }
-function liveW(){ return NATIVE ? (nvSeq?nvc.width:0) : video.videoWidth; }
-function liveH(){ return NATIVE ? (nvSeq?nvc.height:0) : video.videoHeight; }
+function liveEl(){ return NCAM ? nvc : video; }
+function liveW(){ return NCAM ? (nvSeq?nvc.width:0) : video.videoWidth; }
+function liveH(){ return NCAM ? (nvSeq?nvc.height:0) : video.videoHeight; }
 function nativeImage(max){   // a sharp frame of the whole view
   return new Promise(res=>{ let u=""; try{ u=Native.grab(max); }catch{} if(!u) return res(null);
     const im=new Image(); im.onload=()=>res(im); im.onerror=()=>res(null); im.src=u; });
@@ -1055,7 +1065,7 @@ function syncPreview(){   // keep the native camera exactly under the stage
   if(!NATIVE) return;
   const r=stage.getBoundingClientRect(), key=[r.left,r.top,r.width,r.height].map(v=>Math.round(v)).join(",");
   if(key!==lastRect){ lastRect=key; try{ Native.setPreviewRect(r.left,r.top,r.width,r.height); }catch{} }
-  const vis=S.mode==="live"; if(vis!==lastVis){ lastVis=vis; try{ Native.previewVisible(vis); }catch{} }
+  const vis=S.mode==="live" && NCAM; if(vis!==lastVis){ lastVis=vis; try{ Native.previewVisible(vis); }catch{} }
 }
 
 /* ---------- Camera ---------- */
@@ -1063,14 +1073,22 @@ let stream=null;
 function vtrack(){ return stream && stream.getVideoTracks()[0]; }
 async function startLive(deviceId){
   stopLive();
-  if(NATIVE){
+  if(NCAM){
     setMsg("A abrir a câmara…","dim"); video.hidden=true; still.hidden=true; $("#nocam").hidden=true;
     camErr=""; try{ Native.startCamera(); }catch(e){ camErr=String(e); }
-    const t0=performance.now(); let hinted=false;
-    while(!nvSeq){   // the first time Android asks for permission: wait as long as it takes
-      if(camErr){ showNoCam(camErr); return false; }
+    const t0=performance.now(); let hinted=false, t0b=performance.now();
+    let granted=false;
+    while(!nvSeq){   // the first time Android asks for permission: wait for the answer, then give the camera 10 s
+      try{ granted=Native.hasCameraPermission(); }catch{ granted=true; }
+      if(!granted) t0b=performance.now();
+      if(camErr || performance.now()-t0b>10000){
+        // the native camera failed: use the camera the way the browser does
+        console.warn("native camera:", camErr||"no frames"); NCAM=false; try{ Native.previewVisible(false); Native.stopCamera(); }catch{}
+        await sleep(400);   // let the native side release the camera
+        document.body.classList.remove("native"); document.documentElement.classList.remove("native");
+        return startLive(deviceId);
+      }
       if(!hinted && performance.now()-t0>2500){ hinted=true; setMsg("A abrir a câmara… se aparecer o pedido de permissão, aceita.","dim"); }
-      if(performance.now()-t0>90000){ showNoCam("a câmara não enviou imagem"); return false; }
       await sleep(100);
     }
     let ni={}; try{ ni=JSON.parse(Native.info()); }catch{}
@@ -1116,7 +1134,7 @@ function showNoCam(why){
   $("#nocam").hidden=false; setMsg("",""); ui();
 }
 async function applyZoom(z){
-  if(NATIVE){ if(!S.zoomCaps) return false; try{ Native.setZoom(z); S.camZoom=z; return true; }catch{ return false; } }
+  if(NCAM){ if(!S.zoomCaps) return false; try{ Native.setZoom(z); S.camZoom=z; return true; }catch{ return false; } }
   const tr=vtrack(); if(!tr||!S.zoomCaps) return false;
   try{ await tr.applyConstraints({advanced:[{zoom:z}]}); S.camZoom=(tr.getSettings().zoom)||z; return true; }catch{ return false; }
 }
@@ -1150,7 +1168,7 @@ async function findShot(){
     // the scene is measured at this moment; movement is tracked from here
     const {w,h}=S.src, k=Math.min(1,1024/Math.max(w,h));
     const snap=document.createElement("canvas"); snap.width=Math.round(w*k); snap.height=Math.round(h*k);
-    const hi = NATIVE && S.mode==="live" ? await nativeImage(1024) : null;   // the app hands over a sharp frame
+    const hi = NCAM && S.mode==="live" ? await nativeImage(1024) : null;   // the app hands over a sharp frame
     snap.getContext("2d").drawImage(hi||el,0,0,snap.width,snap.height); vtReset();
     const FW=Math.max(16,Math.round(w*160/Math.max(w,h))), FH=Math.max(16,Math.round(h*160/Math.max(w,h)));
     const nsP = S.set.neural ? neuralSal(snap,FW,FH).catch(()=>null) : Promise.resolve(null);
@@ -1178,7 +1196,7 @@ async function findShot(){
     // Gemini Nano, on the phone: chosen directly, or when the cloud fails
     if(!plan && eng==="nano" && !nanoReady()) S.note="Gemini Nano "+({downloadable:"por descarregar (Definições)",downloading:"ainda a descarregar",unavailable:"não disponível"}[nanoState()]||"indisponível")+".";
     if(!plan && (eng==="nano" || eng==="gemini") && nanoReady()){
-      try{ setMsg("O Gemini Nano está a ver a cena…"); plan=fromAI(parseJSON(await askNano(snap.toDataURL("image/jpeg",.85).split(",")[1], PROMPT(snap.width,snap.height)))); who="nano"; S.note=""; }
+      try{ setMsg("O Gemini Nano está a ver a cena…"); plan=fromNano(parseJSON(await askNano(snap.toDataURL("image/jpeg",.85).split(",")[1], PROMPT(snap.width,snap.height)))); who="nano"; S.note=""; }
       catch(e){ S.note=(S.note?S.note+" ":"")+errCopy(e); }
     }
     if(!plan && S.note && !/IA local/.test(S.note)) S.note+=" Usei a IA local.";
@@ -1196,20 +1214,27 @@ async function findShot(){
       plan={subj, shot:null, rule:localLook().styles[0], tip:""};
       if(S.set.neural){ try{ pick=await within(nimaPick(F,snap,subj),6000); }catch{} if(pick) plan.rule=pick.st; }
       who = pick ? "local+ · nota "+pick.n.toFixed(1) : NS ? "local+" : "local";
+    } else if(plan.byNano){
+      let subj=plan.subj ? {...plan.subj, w:.6} : null;    // Nano's box only nudges; it is often off
+      if(!subj){ try{ subj=await detectLocal(el,null); }catch{} }
+      plan.subj=subj;
+      if(S.set.neural){ try{ pick=await within(nimaPick(F,snap,subj),6000); }catch{} if(pick){ plan.rule=pick.st; plan.shot=null; } }
+      who = "nano + "+(pick ? "local+ · nota "+pick.n.toFixed(1) : "local");
     }
     const dt=((performance.now()-t0)/1000).toFixed(1);
     S.note=(S.note?S.note+"  ":"")+who+" · "+dt+" s";
     if(S.phase!=="scan") return;               // cancelled meanwhile
     S.F=F; S.plan=plan; S.subj=plan.subj; S.style=plan.rule; S.tip=plan.tip||LOCAL_TIP[plan.rule];
+    S.label=plan.name || (plan.subj&&plan.subj.name) || "";
     const c=(pick&&pick.c)||planCrop(F,plan); S.frame=toFrame(c,F);
-    S.seen.push(plan.subj?plan.subj.name:"zona "+Math.round(S.frame.x)+","+Math.round(S.frame.y));
+    S.seen.push(S.label?S.label:"zona "+Math.round(S.frame.x)+","+Math.round(S.frame.y));
     S.phase = S.mode==="live" ? "guide" : "locked";
     if(S.mode==="photo"){ setMsg(S.tip,"ok"); S.lockAt=performance.now(); setTimeout(refineShot,0); }
   }catch(e){ S.phase="idle"; setMsg(errCopy(e),"err"); }
   finally{ S.busy=false; $("#scan").hidden=true; ui(); }
 }
 async function lock(){
-  if(NATIVE && S.mode==="live" && S.zoomCaps) return nativeLock();
+  if(NCAM && S.mode==="live" && S.zoomCaps) return nativeLock();
   // The crop stays exactly where the frame was. The preview zooms into that same crop,
   // so what you see is what gets saved. (A real lens switch shifted the centre on some phones.)
   const f=curFrame(), w=Math.min(f.w,S.src.w), h=Math.min(f.h,S.src.h);
@@ -1245,7 +1270,7 @@ async function refineShot(){
   const rw=Math.min(SW,f.w*1.5), rh=Math.min(SH,f.h*1.5);
   const rx=cl(f.x+f.w/2-rw/2,0,SW-rw), ry=cl(f.y+f.h/2-rh/2,0,SH-rh);
   try{
-    let src=srcEl(); if(NATIVE && S.mode==="live"){ const im=await nativeImage(1600); if(im) src=im; }
+    let src=srcEl(); if(NCAM && S.mode==="live"){ const im=await nativeImage(1600); if(im) src=im; }
     const iw=src.naturalWidth||src.videoWidth||src.width, kk=iw/SW;
     const ss=Math.min(kk, 768/Math.max(rw,rh));            // snap pixels per view pixel
     const snap=document.createElement("canvas"); snap.width=Math.max(16,Math.round(rw*ss)); snap.height=Math.max(16,Math.round(rh*ss));
@@ -1384,7 +1409,7 @@ async function capture(){
   if(!f){ const w=Math.min(SW,SH*S.ratio), h=w/S.ratio; f={x:(SW-w)/2,y:(SH-h)/2,w,h}; }
   const w=Math.min(f.w,SW), h=Math.min(f.h,SH), x=cl(f.x,0,SW-w), y=cl(f.y,0,SH-h);
   let c=null;
-  if(S.mode==="live" && NATIVE){
+  if(S.mode==="live" && NCAM){
     S.capturing=true; shutter.disabled=true; setMsg("A tirar a foto…","ok");
     try{ c=await nativePhoto({x:x/SW,y:y/SH,w:w/SW,h:h/SH}); }catch{ c=null; }
     S.capturing=false; shutter.disabled=false; S.fullres=!!c;
@@ -1408,7 +1433,7 @@ async function capture(){
   S.meta = S.mode==="live" ? {...(S.liveMeta||{}), focal35:26} : S.photoMeta;
   if(S.mode==="photo") S.shotZoom=digital;
   const rec={id:Date.now(), zoom:S.shotZoom, date:S.shotDate.getTime(), meta:S.meta||null, style:S.style,
-             subj:(S.subj&&S.subj.name)||"", filter:S.filter, border:S.border};
+             subj:S.label||(S.subj&&S.subj.name)||"", filter:S.filter, border:S.border};
   S.cur=rec;
   c.toBlob(b=>{ rec.blob=b; makeThumb(c).then(t=>{ rec.thumb=t; DB.put(rec).then(refreshThumb).catch(()=>{}); }); },"image/jpeg",.95);
   if(S.mode==="live"){ S.phase="idle"; S.frame=null; resetView(); setMsg("Guardada na galeria da app.","ok"); }
@@ -1433,7 +1458,7 @@ const FILTERS=[
   ["noir","Noir",{f:"grayscale(1) contrast(1.45) brightness(.95)",vig:.5,grain:.08}]
 ];
 const BORDERS=[["none","Sem"],["ficha","Ficha técnica"],["polaroid","Polaroid"],["white","Branca"],["galeria","Galeria"],["pelicula","Película"],["desfocado","Desfocado"],["paper","Papel"],["date","Data"]];
-function frameLabel(){ return (S.subj&&S.subj.name) ? S.subj.name : STYLE_LABEL[S.style]; }
+function frameLabel(){ return S.label || ((S.subj&&S.subj.name) ? S.subj.name : STYLE_LABEL[S.style]); }
 
 let grainTile=null;
 function grain(){
@@ -1551,7 +1576,7 @@ try{ document.fonts && document.fonts.load('40px "Caveat"').then(()=>{ if(!$("#r
 function buildOpts(){
   const info=shotInfo();
   const mp=(S.shot.width*S.shot.height/1e6);
-  $("#resInfo").textContent=[S.subj&&S.subj.name, (mp>=1?mp.toFixed(1):mp.toFixed(2))+" MP", S.aiLook?"look da IA":"", info.date].filter(Boolean).join("  ·  ");
+  $("#resInfo").textContent=[S.label||(S.subj&&S.subj.name), (mp>=1?mp.toFixed(1):mp.toFixed(2))+" MP", S.aiLook?"look da IA":"", info.date].filter(Boolean).join("  ·  ");
   // filter thumbnails rendered from the photo itself
   const fb=$("#filters"); fb.innerHTML="";
   const sm=document.createElement("canvas"), k=116/Math.min(S.shot.width,S.shot.height);
@@ -1667,7 +1692,7 @@ function draw(){
   syncPreview();
   if(S.mode==="live" && liveW()) S.src={w:liveW(),h:liveH()};
   if(tracking() && liveW()){ const now=performance.now();
-    if(NATIVE ? VT.seq!==nvSeq : (!VT.t||now-VT.t>30)){ VT.t=now; VT.seq=nvSeq; try{ vtStep(liveEl(),liveW(),liveH()); }catch{} } }
+    if(NCAM ? VT.seq!==nvSeq : (!VT.t||now-VT.t>30)){ VT.t=now; VT.seq=nvSeq; try{ vtStep(liveEl(),liveW(),liveH()); }catch{} } }
   const dpr=window.devicePixelRatio||1, L=layout();
   if(ov.width!==Math.round(L.VW*dpr)||ov.height!==Math.round(L.VH*dpr)){ ov.width=Math.round(L.VW*dpr); ov.height=Math.round(L.VH*dpr); }
   ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,L.VW,L.VH);
@@ -1703,7 +1728,7 @@ function draw(){
       ctx.setLineDash([5,6]); ctx.strokeStyle=col; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(tx,ty); ctx.stroke(); ctx.setLineDash([]);
       ctx.fillStyle=col; ctx.beginPath(); ctx.arc(tx,ty,4.5,0,Math.PI*2); ctx.fill();
     }
-    const name=S.subj&&S.subj.name;
+    const name=S.label||(S.subj&&S.subj.name);
     if(name){
       chip.hidden=false; chip.classList.toggle("ok",aligned); chip.querySelector("span").textContent=name;
       const below=fy+fh+8+26<L.VH, y=below?fy+fh+8:Math.max(8,fy-32);
