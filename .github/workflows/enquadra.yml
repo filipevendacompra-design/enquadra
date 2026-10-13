@@ -16,12 +16,17 @@ jobs:
         with:
           gradle-version: "8.14.3"
 
+      - uses: actions/checkout@v4
+
       - name: Criar o projeto
         id: criar
         run: |
           exec > >(tee -a "$GITHUB_WORKSPACE/passos.log") 2>&1
           echo "== Criar projeto =="
-          mkdir -p enquadra/app/src/main/java/pt/filipe/enquadra
+          mkdir -p enquadra/app/src/main/java/pt/filipe/enquadra enquadra/app/src/main/assets
+          for f in index.html u2netp.onnx nima.onnx; do
+            if [ -f "$f" ]; then cp "$f" enquadra/app/src/main/assets/; echo "incluído: $f"; else echo "FALTA no repositório: $f"; exit 1; fi
+          done
           cd enquadra
 
           cat > settings.gradle.kts <<'EOF'
@@ -58,8 +63,8 @@ jobs:
                   applicationId = "pt.filipe.enquadra"
                   minSdk = 29
                   targetSdk = 34
-                  versionCode = 3
-                  versionName = "0.3"
+                  versionCode = 4
+                  versionName = "0.4"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -76,7 +81,7 @@ jobs:
               implementation("androidx.camera:camera-lifecycle:$cx")
               implementation("androidx.camera:camera-view:$cx")
               implementation("androidx.activity:activity-ktx:1.9.3")
-              implementation("com.google.mlkit:object-detection:17.0.2")
+              implementation("androidx.webkit:webkit:1.12.1")
               implementation("com.google.mlkit:genai-prompt:1.0.0-beta4")
               implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
           }
@@ -102,1232 +107,373 @@ jobs:
           package pt.filipe.enquadra
 
           import android.Manifest
-          import android.app.AlertDialog
+          import android.annotation.SuppressLint
           import android.content.ContentValues
-          import android.content.Context
-          import android.content.Intent
           import android.content.pm.PackageManager
-          import android.graphics.Matrix
-          import android.net.Uri
-          import android.view.MotionEvent
-          import android.view.ScaleGestureDetector
-          import android.widget.HorizontalScrollView
-          import android.widget.ImageView
-          import androidx.camera.core.ImageProxy
-          import com.google.mlkit.genai.common.FeatureStatus
           import android.graphics.Bitmap
-          import android.graphics.Canvas
+          import android.graphics.BitmapFactory
           import android.graphics.Color
-          import android.graphics.DashPathEffect
-          import android.graphics.Paint
-          import android.graphics.RectF
-          import android.hardware.Sensor
-          import android.hardware.SensorEvent
-          import android.hardware.SensorEventListener
-          import android.hardware.SensorManager
-          import android.hardware.camera2.CameraCharacteristics
+          import android.graphics.Matrix
+          import android.graphics.Outline
+          import android.net.Uri
           import android.os.Bundle
           import android.os.Handler
           import android.os.Looper
+          import android.os.SystemClock
           import android.provider.MediaStore
-          import android.text.InputType
-          import android.text.SpannableString
-          import android.text.Spanned
-          import android.text.style.ForegroundColorSpan
           import android.util.Base64
-          import android.view.Gravity
+          import android.util.Size
           import android.view.View
-          import android.widget.ArrayAdapter
-          import android.widget.Button
-          import android.widget.EditText
+          import android.view.ViewOutlineProvider
+          import android.webkit.JavascriptInterface
+          import android.webkit.PermissionRequest
+          import android.webkit.ValueCallback
+          import android.webkit.WebChromeClient
+          import android.webkit.WebResourceRequest
+          import android.webkit.WebResourceResponse
+          import android.webkit.WebView
           import android.widget.FrameLayout
-          import android.widget.LinearLayout
-          import android.widget.ScrollView
-          import android.widget.Spinner
-          import android.widget.TextView
           import androidx.activity.ComponentActivity
+          import androidx.activity.addCallback
           import androidx.activity.result.contract.ActivityResultContracts
-          import androidx.camera.camera2.interop.Camera2CameraInfo
+          import androidx.camera.core.Camera
           import androidx.camera.core.CameraSelector
+          import androidx.camera.core.ImageAnalysis
           import androidx.camera.core.ImageCapture
           import androidx.camera.core.ImageCaptureException
+          import androidx.camera.core.ImageProxy
           import androidx.camera.core.Preview
           import androidx.camera.core.resolutionselector.AspectRatioStrategy
           import androidx.camera.core.resolutionselector.ResolutionSelector
+          import androidx.camera.core.resolutionselector.ResolutionStrategy
           import androidx.camera.lifecycle.ProcessCameraProvider
           import androidx.camera.view.PreviewView
           import androidx.core.content.ContextCompat
-          import com.google.android.gms.tasks.Tasks
-          import com.google.mlkit.vision.common.InputImage
-          import com.google.mlkit.vision.objects.ObjectDetection
-          import com.google.mlkit.vision.objects.defaults.ObjectDetectorOptions
-          import org.json.JSONArray
+          import androidx.webkit.WebViewAssetLoader
+          import androidx.webkit.WebViewClientCompat
+          import com.google.mlkit.genai.common.FeatureStatus
           import org.json.JSONObject
           import java.io.ByteArrayOutputStream
-          import java.io.IOException
-          import java.net.HttpURLConnection
-          import java.net.SocketTimeoutException
-          import java.net.URL
-          import java.text.SimpleDateFormat
-          import java.util.Date
-          import java.util.Locale
+          import java.io.File
+          import java.io.FileOutputStream
           import java.util.concurrent.Executors
-          import java.util.concurrent.TimeUnit
-          import kotlin.math.abs
-          import kotlin.math.hypot
           import kotlin.math.max
           import kotlin.math.min
           import kotlin.math.roundToInt
-          import kotlin.math.sqrt
 
-          /** Box in normalized view coordinates (0..1). The view is 3:4, same as the photo. */
-          data class Box(val x: Float, val y: Float, val w: Float, val h: Float) {
-              val cx: Float get() = x + w / 2f
-              val cy: Float get() = y + h / 2f
-          }
-
-          data class Plan(
-              val subject: String, val subj: Box?, val shot: Box, val rule: String,
-              val tip: String, val source: String, val note: String,
-              val filter: String = "clean", val border: String = "none"
-          )
-
-          class Persona(val label: String, val temp: Double, val lo: Float, val hi: Float, val cover: String, val text: String)
-
-          class GErr(val human: String, val fatal: Boolean) : Exception(human)
-
-          val PERSONAS: Map<String, Persona> = linkedMapOf(
-              "criativo" to Persona("Criativo", 0.95, 0.20f, 0.75f, "20-60%",
-                  "Style: creative and bold, like a street or fine-art photographer with a strong eye. Look past the obvious subject. Seek:\n" +
-                  "- details and textures most people miss; patterns and repetition, ideally with one element that breaks it;\n" +
-                  "- light as the subject: backlight, rim light, hard shadows, light and shadow shapes, glow, silhouettes;\n" +
-                  "- reflections in glass, water and puddles; layers with something in the foreground framing the scene;\n" +
-                  "- abstract geometry: lines, curves, diagonals, colour blocks, minimal compositions with a small subject in a large empty space.\n" +
-                  "Frame with intent and some tension: off-centre placement, a tight crop on a detail, strong diagonals, deliberate negative space. A deliberate cut is fine; an accidental one is not."),
-              "equilibrado" to Persona("Equilibrado", 0.5, 0.30f, 0.65f, "30-55%",
-                  "Style: balanced. A strong subject with good light, placed with a composition rule that suits the scene."),
-              "classico" to Persona("Clássico", 0.3, 0.35f, 0.65f, "30-55%",
-                  "Style: classic and clean. One clear, readable subject, placed on the rule of thirds or centred when symmetric. Calm, balanced framing with breathing room."),
-              "minimal" to Persona("Minimalista", 0.6, 0.25f, 0.60f, "25-55%",
-                  "Style: minimalist. One simple element, lots of clean negative space, few colours, simple geometry. Avoid busy areas."),
-              "documental" to Persona("Documental", 0.5, 0.35f, 0.70f, "35-65%",
-                  "Style: documentary. People, gestures and everyday moments first; otherwise the detail that tells the story of the place. Honest framing, little stylisation.")
-          )
-
-          /** Draws the target frame and the guide line from the centre of the view to it. */
-          class Overlay(ctx: Context) : View(ctx) {
-              var target: RectF? = null
-              var aligned = false
-              private val pFrame = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 6f; color = Color.WHITE }
-              private val pLine = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                  style = Paint.Style.STROKE; strokeWidth = 4f; color = Color.argb(210, 255, 255, 255)
-                  pathEffect = DashPathEffect(floatArrayOf(18f, 14f), 0f)
-              }
-              private val pDot = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
-              private val pDim = Paint().apply { color = Color.argb(110, 0, 0, 0) }
-              private val pGrid = Paint().apply { color = Color.argb(60, 255, 255, 255); strokeWidth = 2f }
-
-              override fun onDraw(c: Canvas) {
-                  super.onDraw(c)
-                  val w = width.toFloat()
-                  val h = height.toFloat()
-                  for (i in 1..2) {
-                      c.drawLine(w * i / 3f, 0f, w * i / 3f, h, pGrid)
-                      c.drawLine(0f, h * i / 3f, w, h * i / 3f, pGrid)
-                  }
-                  val t = target ?: return
-                  val r = RectF(t.left * w, t.top * h, t.right * w, t.bottom * h)
-                  c.save()
-                  c.clipOutRect(r)
-                  c.drawRect(0f, 0f, w, h, pDim)
-                  c.restore()
-                  pFrame.color = if (aligned) Color.rgb(255, 214, 10) else Color.WHITE
-                  c.drawRect(r, pFrame)
-                  if (!aligned) {
-                      c.drawLine(w / 2f, h / 2f, r.centerX(), r.centerY(), pLine)
-                      c.drawCircle(w / 2f, h / 2f, 10f, pDot)
-                      c.drawCircle(r.centerX(), r.centerY(), 16f, pFrame)
-                  }
-              }
-          }
-
-          class MainActivity : ComponentActivity(), SensorEventListener {
-              companion object {
-                  const val M1 = "gemini-3.5-flash-lite"
-                  const val M2 = "gemini-3.8-flash"
-                  const val M3 = "gemini-3.6-flash"
-                  const val PAUSE_MS = 120_000L
-                  const val CHECK_MS = 120_000L
-                  const val G_UNKNOWN = 0
-                  const val G_OK = 1
-                  const val G_DOWN = 2
-                  const val G_NOKEY = 3
-                  const val G_BADKEY = 4
-              }
-
-              private lateinit var previewView: PreviewView
-              private lateinit var overlay: Overlay
-              private lateinit var msg: TextView
-              private lateinit var chip: TextView
-              private lateinit var zoomTxt: TextView
-              private lateinit var aiBtn: Button
-              private lateinit var shutter: Button
+          /**
+           * Enquadra: the HTML app (index.html in assets) drawn over the native camera.
+           * The page asks for frames, zoom (real lenses), full-resolution photos, saving and Gemini Nano through window.Native.
+           */
+          class MainActivity : ComponentActivity() {
               private lateinit var root: FrameLayout
-              private val lensBtns = ArrayList<Pair<Float, TextView>>()
+              private lateinit var preview: PreviewView
+              private lateinit var web: WebView
 
-              // Gemini Nano (on the phone)
-              private val nanoEx = Executors.newSingleThreadExecutor()
-              @Volatile private var nState = Nano.UNKNOWN
-              @Volatile private var nModel = ""
-
-              // Result screen
-              @Volatile private var lastUri: Uri? = null
-              private var resFull: Bitmap? = null
-              private var resSmall: Bitmap? = null
-              private var resFilter = "clean"
-              private var resBorder = "none"
-              private var resCaption = ""
-              private var resInfo = ""
-              private var resultLayer: View? = null
-              private lateinit var resImg: ImageView
-              private val filterBtns = HashMap<String, TextView>()
-              private val borderBtns = HashMap<String, TextView>()
-
-              private var camera: androidx.camera.core.Camera? = null
+              private var camera: Camera? = null
               private var imageCapture: ImageCapture? = null
-              private val io = Executors.newSingleThreadExecutor()
+              private var bound = false
+              private val frameExec = Executors.newSingleThreadExecutor()
+              private val photoExec = Executors.newSingleThreadExecutor()
+              private val nanoExec = Executors.newSingleThreadExecutor()
               private val ui = Handler(Looper.getMainLooper())
-              private val prefs by lazy { getSharedPreferences("enquadra", Context.MODE_PRIVATE) }
-              private lateinit var sensors: SensorManager
 
-              private val rot = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f)
-              private var rot0: FloatArray? = null
-              private var hTan = 0.55f   // tan(half field of view) at 1x, across the portrait view
-              private var vTan = 0.73f   // same, along the portrait view
+              private val frameLock = Any()
+              private var latest: Bitmap? = null          // upright analysis frame (about 1280x960)
+              private var lastPush = 0L
+              @Volatile private var pageReady = false
+              @Volatile private var nState = Nano.UNKNOWN
 
-              private var plan: Plan? = null
-              private var targetZoom = 1f
-              private var alignedSince = 0L
-              private var zoomedIn = false
-              private var busy = false
-              private val seen = ArrayList<String>()
-              private val paused = java.util.concurrent.ConcurrentHashMap<String, Long>()   // model -> skip until (ms)
-
-              // Gemini health, checked when the camera opens and every 2 minutes: the ✦ button never waits for a dead service.
-              private val net = Executors.newSingleThreadExecutor()
-              @Volatile private var gState = G_UNKNOWN
-              @Volatile private var gModel = ""
-              @Volatile private var gWhy = ""   // last failure, per model, shown to the user
-              private var checking = false
-              private val checker = object : Runnable {
-                  override fun run() {
-                      checkGemini()
-                      ui.postDelayed(this, CHECK_MS)
-                  }
+              private var fileCallback: ValueCallback<Array<Uri>>? = null
+              private val pickImage = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+                  fileCallback?.onReceiveValue(if (uri != null) arrayOf(uri) else null)
+                  fileCallback = null
               }
-
-              private val detector by lazy {
-                  ObjectDetection.getClient(
-                      ObjectDetectorOptions.Builder()
-                          .setDetectorMode(ObjectDetectorOptions.SINGLE_IMAGE_MODE)
-                          .enableMultipleObjects()
-                          .enableClassification()
-                          .build()
-                  )
-              }
-
               private val askCam = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-                  if (ok) startCamera() else say("Sem permissão de câmara.")
+                  if (ok) bindCamera()
               }
 
-              // ---------- UI ----------
-              private fun dp(v: Int) = (v * resources.displayMetrics.density).roundToInt()
-              private fun pref(k: String, d: String) = prefs.getString(k, d) ?: d
-              private fun say(t: String) { msg.text = t }
-              private fun persona(): Persona = PERSONAS[pref("persona", "criativo")] ?: PERSONAS.getValue("criativo")
+              private fun shotsDir(): File = File(cacheDir, "shots").apply { mkdirs() }
+              private fun js(code: String) { ui.post { web.evaluateJavascript(code, null) } }
 
-              /** Coloured dot + who will answer the next ✦. */
-              private fun renderChip() {
-                  val (dot, color, text) = when (gState) {
-                      G_OK -> Triple("●", Color.rgb(52, 199, 89), "Gemini · $gModel")
-                      G_DOWN -> Triple("●", Color.rgb(255, 69, 58), "Gemini em baixo · IA local")
-                      G_BADKEY -> Triple("●", Color.rgb(255, 69, 58), "Chave inválida · IA local")
-                      G_NOKEY -> Triple("○", Color.GRAY, "IA local · sem chave do Gemini")
-                      else -> Triple("●", Color.rgb(255, 204, 0), "A verificar o Gemini…")
-                  }
-                  val eng = pref("engine", "auto")
-                  val nanoOk = nState == FeatureStatus.AVAILABLE
-                  val line = when (eng) {
-                      "nano" -> Triple("●", if (nanoOk) Color.rgb(52, 199, 89) else Color.rgb(255, 69, 58), "Só Gemini Nano · " + Nano.statusText(nState))
-                      "local" -> Triple("○", Color.GRAY, "Só IA local (ML Kit)")
-                      else -> Triple(dot, color, text + (if (eng == "auto" && nanoOk) " · Nano ✓" else ""))
-                  }
-                  val sp = SpannableString("${line.first}  ${line.third} · ${persona().label}")
-                  sp.setSpan(ForegroundColorSpan(line.second), 0, line.first.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                  chip.text = sp
-              }
-
-              private fun setGemini(state: Int, model: String = "") {
-                  gState = state
-                  gModel = model
-                  ui.post { renderChip() }
-              }
-
-              /** Tiny request (a few tokens, 4 s limit) to every configured model, in order. */
-              private fun checkGemini() {
-                  if (checking) return
-                  val key = pref("key", "").trim()
-                  if (key.isEmpty()) { setGemini(G_NOKEY); return }
-                  checking = true
-                  if (gState != G_OK) setGemini(G_UNKNOWN)
-                  val list = models()
-                  net.execute {
-                      var state = G_DOWN
-                      var ok = ""
-                      val why = StringBuilder()
-                      for (m in list) {
-                          val t0 = System.currentTimeMillis()
-                          try {
-                              val body = JSONObject()
-                                  .put("contents", JSONArray().put(JSONObject().put("role", "user")
-                                      .put("parts", JSONArray().put(JSONObject().put("text", "Reply with: ok")))))
-                              post(key, m, body, 4000, 8000)
-                              state = G_OK; ok = m
-                              break
-                          } catch (e: GErr) {
-                              why.append(m).append(": ").append(e.human).append(" (").append((System.currentTimeMillis() - t0) / 100 / 10.0).append(" s)\n")
-                              if (e.fatal) { state = G_BADKEY; break }
-                          } catch (e: Exception) {
-                              why.append(m).append(": ").append(e.javaClass.simpleName).append("\n")
-                          }
-                      }
-                      gWhy = why.toString().trim()
-                      if (state == G_OK) paused.clear()
-                      val report = gWhy
-                      if (state != G_OK && report.isNotEmpty()) ui.post { say("Gemini indisponível:\n$report") }
-                      ui.post { checking = false }
-                      setGemini(state, ok)
-                  }
-              }
-
-              private fun models(): List<String> =
-                  listOf(pref("model1", M1).trim(), pref("model2", M2).trim(), pref("model3", M3).trim()).filter { it.isNotEmpty() }.distinct()
-
+              @SuppressLint("SetJavaScriptEnabled")
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-                  sensors = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+                  shotsDir().listFiles()?.forEach { it.delete() }
+                  val density = resources.displayMetrics.density
 
-                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.BLACK) }
-
-                  val top = LinearLayout(this).apply {
-                      orientation = LinearLayout.HORIZONTAL
-                      gravity = Gravity.CENTER_VERTICAL
-                      setPadding(dp(16), dp(36), dp(8), dp(4))
-                  }
-                  chip = TextView(this).apply { setTextColor(Color.LTGRAY); textSize = 13f }
-                  val settings = Button(this).apply { text = "⚙"; textSize = 18f; setOnClickListener { openSettings() } }
-                  top.addView(chip, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                  top.addView(settings)
-
-                  val stage = FrameLayout(this)
-                  previewView = PreviewView(this).apply {
-                      scaleType = PreviewView.ScaleType.FILL_CENTER
+                  root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+                  preview = PreviewView(this).apply {
                       implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                  }
-                  overlay = Overlay(this)
-                  zoomTxt = TextView(this).apply {
-                      setTextColor(Color.WHITE); textSize = 13f; setBackgroundColor(Color.argb(120, 0, 0, 0))
-                      setPadding(dp(8), dp(4), dp(8), dp(4))
-                  }
-                  stage.addView(previewView, FrameLayout.LayoutParams(-1, -1))
-                  stage.addView(overlay, FrameLayout.LayoutParams(-1, -1))
-                  stage.addView(zoomTxt, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply { topMargin = dp(8); marginEnd = dp(8) })
-                  val lensBar = LinearLayout(this).apply {
-                      orientation = LinearLayout.HORIZONTAL
-                      setBackgroundColor(Color.argb(120, 0, 0, 0))
-                      setPadding(dp(4), dp(2), dp(4), dp(2))
-                  }
-                  for (z in floatArrayOf(0.6f, 1f, 3f, 5f)) {
-                      val t = TextView(this).apply {
-                          text = if (z < 1f) ".6" else "${z.toInt()}x"
-                          setTextColor(Color.WHITE); textSize = 15f
-                          setPadding(dp(14), dp(8), dp(14), dp(8))
-                          setOnClickListener { manualZoom(z) }
+                      scaleType = PreviewView.ScaleType.FILL_CENTER
+                      visibility = View.INVISIBLE
+                      clipToOutline = true
+                      outlineProvider = object : ViewOutlineProvider() {
+                          override fun getOutline(view: View, outline: Outline) {
+                              outline.setRoundRect(0, 0, view.width, view.height, 20f * density)
+                          }
                       }
-                      lensBtns.add(Pair(z, t))
-                      lensBar.addView(t)
                   }
-                  stage.addView(lensBar, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(10) })
-                  val pinch = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-                      override fun onScale(detector: ScaleGestureDetector): Boolean {
-                          manualZoom(curZoom() * detector.scaleFactor)
+                  root.addView(preview, FrameLayout.LayoutParams(1, 1))
+
+                  web = WebView(this)
+                  web.setBackgroundColor(Color.TRANSPARENT)
+                  web.settings.javaScriptEnabled = true
+                  web.settings.domStorageEnabled = true
+                  web.settings.mediaPlaybackRequiresUserGesture = false
+                  web.settings.allowFileAccess = false
+                  val loader = WebViewAssetLoader.Builder()
+                      .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
+                      .addPathHandler("/shots/", WebViewAssetLoader.InternalStoragePathHandler(this, shotsDir()))
+                      .build()
+                  web.webViewClient = object : WebViewClientCompat() {
+                      override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
+                          loader.shouldInterceptRequest(request.url)
+                  }
+                  web.webChromeClient = object : WebChromeClient() {
+                      override fun onShowFileChooser(
+                          webView: WebView, filePathCallback: ValueCallback<Array<Uri>>, fileChooserParams: FileChooserParams
+                      ): Boolean {
+                          fileCallback?.onReceiveValue(null)
+                          fileCallback = filePathCallback
+                          pickImage.launch("image/*")
                           return true
                       }
-                  })
-                  overlay.setOnTouchListener { v, e ->
-                      pinch.onTouchEvent(e)
-                      if (e.action == MotionEvent.ACTION_UP) v.performClick()
-                      true
-                  }
 
-                  msg = TextView(this).apply {
-                      setTextColor(Color.WHITE); textSize = 16f; gravity = Gravity.CENTER
-                      setPadding(dp(16), dp(12), dp(16), dp(4))
+                      override fun onPermissionRequest(request: PermissionRequest) {
+                          request.deny()   // the camera is native; the page never opens it itself
+                      }
                   }
-                  val row = LinearLayout(this).apply {
-                      orientation = LinearLayout.HORIZONTAL
-                      gravity = Gravity.CENTER
-                      setPadding(0, dp(8), 0, dp(24))
-                  }
-                  aiBtn = Button(this).apply { text = "✦"; textSize = 26f; setOnClickListener { findShot() } }
-                  aiBtn.setOnLongClickListener { resetPlan(); say("Enquadramento limpo."); true }
-                  shutter = Button(this).apply { text = "●"; textSize = 30f; setOnClickListener { takePhoto() } }
-                  val gallery = Button(this).apply { text = "▣"; textSize = 22f; setOnClickListener { openGallery() } }
-                  row.addView(gallery, LinearLayout.LayoutParams(dp(72), dp(72)).apply { marginEnd = dp(20) })
-                  row.addView(aiBtn, LinearLayout.LayoutParams(dp(96), dp(72)).apply { marginEnd = dp(20) })
-                  row.addView(shutter, LinearLayout.LayoutParams(dp(96), dp(72)))
-
-                  val screenW = resources.displayMetrics.widthPixels
-                  col.addView(top)
-                  col.addView(stage, LinearLayout.LayoutParams(screenW, screenW * 4 / 3))
-                  col.addView(msg)
-                  col.addView(row)
-                  root = FrameLayout(this)
-                  root.addView(col, FrameLayout.LayoutParams(-1, -1))
+                  web.addJavascriptInterface(Bridge(), "Native")
+                  root.addView(web, FrameLayout.LayoutParams(-1, -1))
                   setContentView(root)
-                  checkNano()
 
-                  chip.setOnClickListener {
-                      if (gWhy.isNotEmpty() && gState != G_OK) say("Último erro:\n$gWhy\nA verificar outra vez…") else say("A verificar o Gemini…")
-                      checkGemini()
+                  onBackPressedDispatcher.addCallback(this) {
+                      if (web.canGoBack()) web.goBack() else finish()
                   }
-                  renderChip()
-                  say("A abrir a câmara…")
-                  if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) startCamera()
-                  else askCam.launch(Manifest.permission.CAMERA)
-              }
-
-              override fun onResume() {
-                  super.onResume()
-                  sensors.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)?.let {
-                      sensors.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
-                  }
-                  ui.removeCallbacks(checker)
-                  ui.post(checker)
-              }
-
-              override fun onPause() {
-                  super.onPause()
-                  sensors.unregisterListener(this)
-                  ui.removeCallbacks(checker)
+                  nanoExec.execute { nState = Nano.status() }
+                  web.loadUrl("https://appassets.androidplatform.net/assets/index.html")
               }
 
               override fun onDestroy() {
                   super.onDestroy()
-                  io.shutdown()
-                  net.shutdown()
-                  nanoEx.shutdown()
+                  frameExec.shutdown()
+                  photoExec.shutdown()
+                  nanoExec.shutdown()
               }
 
               // ---------- Camera ----------
-              private fun startCamera() {
+              private fun bindCamera() {
+                  if (bound) return
                   val future = ProcessCameraProvider.getInstance(this)
                   future.addListener({
                       try {
                           val provider = future.get()
-                          val rs = ResolutionSelector.Builder()
+                          val r43 = ResolutionSelector.Builder()
                               .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
                               .build()
-                          val pv = Preview.Builder().setResolutionSelector(rs).build()
-                          pv.setSurfaceProvider(previewView.surfaceProvider)
+                          val pv = Preview.Builder().setResolutionSelector(r43).build()
+                          pv.setSurfaceProvider(preview.surfaceProvider)
                           val ic = ImageCapture.Builder()
-                              .setResolutionSelector(rs)
+                              .setResolutionSelector(r43)
                               .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                               .build()
+                          val rAn = ResolutionSelector.Builder()
+                              .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                              .setResolutionStrategy(ResolutionStrategy(Size(1280, 960), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER))
+                              .build()
+                          val an = ImageAnalysis.Builder()
+                              .setResolutionSelector(rAn)
+                              .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                              .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                              .build()
+                          an.setAnalyzer(frameExec) { img -> onFrame(img) }
                           provider.unbindAll()
-                          camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, pv, ic)
+                          camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, pv, ic, an)
                           imageCapture = ic
-                          readFov()
-                          camera?.cameraInfo?.zoomState?.observe(this) { z ->
-                              zoomTxt.text = String.format(Locale.US, "%.1fx", z.zoomRatio)
-                              for ((lz, t) in lensBtns) t.setTextColor(if (abs(z.zoomRatio - lz) < 0.12f * lz) Color.rgb(255, 214, 10) else Color.WHITE)
-                          }
-                          say("Aponta e carrega em ✦")
+                          bound = true
                       } catch (e: Exception) {
-                          say("Não consegui abrir a câmara: ${e.message}")
+                          js("console.error(" + JSONObject.quote("camera: " + e.message) + ")")
                       }
                   }, ContextCompat.getMainExecutor(this))
               }
 
-              /** Field of view of the 1x camera, used to turn phone rotation into movement on screen. */
-              private fun readFov() {
-                  val info = camera?.cameraInfo ?: return
-                  try {
-                      val c2 = Camera2CameraInfo.from(info)
-                      val f = c2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: return
-                      val s = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return
-                      if (f <= 0f) return
-                      hTan = min(s.width, s.height) / (2f * f)
-                      vTan = max(s.width, s.height) / (2f * f)
-                  } catch (e: Exception) {
-                      // keep the defaults
-                  }
+              private fun upright(b: Bitmap, deg: Int): Bitmap {
+                  if (deg == 0) return b
+                  val m = Matrix()
+                  m.postRotate(deg.toFloat())
+                  return Bitmap.createBitmap(b, 0, 0, b.width, b.height, m, true)
               }
 
-              private fun curZoom(): Float = camera?.cameraInfo?.zoomState?.value?.zoomRatio ?: 1f
-
-              private fun clampZoom(z: Float): Float {
-                  val st = camera?.cameraInfo?.zoomState?.value ?: return z
-                  return z.coerceIn(max(1f, st.minZoomRatio), max(1f, st.maxZoomRatio))
-              }
-
-              private fun manualZoom(z: Float) {
-                  val st = camera?.cameraInfo?.zoomState?.value ?: return
-                  camera?.cameraControl?.setZoomRatio(z.coerceIn(st.minZoomRatio, st.maxZoomRatio))
-              }
-
-              private fun checkNano() {
-                  nanoEx.execute {
-                      nState = Nano.status()
-                      if (nState == FeatureStatus.AVAILABLE) nModel = Nano.baseModel()
-                      ui.post { renderChip() }
-                  }
-              }
-
-              private fun downloadNano() {
-                  nState = FeatureStatus.DOWNLOADING
-                  renderChip()
-                  nanoEx.execute {
-                      Nano.download { m -> ui.post { say(m) } }
-                      nState = Nano.status()
-                      if (nState == FeatureStatus.AVAILABLE) nModel = Nano.baseModel()
-                      ui.post { renderChip() }
-                  }
-              }
-
-              private fun openGallery() {
-                  val u = lastUri
-                  val i = if (u != null) Intent(Intent.ACTION_VIEW).setDataAndType(u, "image/jpeg").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                  else Intent(Intent.ACTION_VIEW, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
-                  try { startActivity(i) } catch (e: Exception) { say("Não encontrei a galeria.") }
-              }
-
-              // ---------- Motion: where the target is now ----------
-              override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-
-              override fun onSensorChanged(event: SensorEvent) {
-                  SensorManager.getRotationMatrixFromVector(rot, event.values)
-                  updateOverlay()
-              }
-
-              /** Point seen at (nx, ny) when the scene was analysed -> where it is on screen now. */
-              private fun project(nx: Float, ny: Float): FloatArray? {
-                  val r0 = rot0 ?: return floatArrayOf(nx, ny)
-                  val dx = (nx - 0.5f) * 2f * hTan
-                  val dy = -(ny - 0.5f) * 2f * vTan
-                  val dz = -1f
-                  val wx = r0[0] * dx + r0[1] * dy + r0[2] * dz
-                  val wy = r0[3] * dx + r0[4] * dy + r0[5] * dz
-                  val wz = r0[6] * dx + r0[7] * dy + r0[8] * dz
-                  val ex = rot[0] * wx + rot[3] * wy + rot[6] * wz
-                  val ey = rot[1] * wx + rot[4] * wy + rot[7] * wz
-                  val ez = rot[2] * wx + rot[5] * wy + rot[8] * wz
-                  if (ez > -0.05f) return null
-                  val z = curZoom()
-                  return floatArrayOf(
-                      0.5f + (ex / -ez) / (2f * hTan) * z,
-                      0.5f - (ey / -ez) / (2f * vTan) * z
-                  )
-              }
-
-              private fun updateOverlay() {
-                  val p = plan ?: return
-                  val c = project(p.shot.cx, p.shot.cy)
-                  if (c == null) {
-                      overlay.target = null
-                      overlay.invalidate()
-                      return
-                  }
-                  val z = curZoom()
-                  val hw = p.shot.w * z / 2f
-                  val hh = p.shot.h * z / 2f
-                  overlay.target = RectF(c[0] - hw, c[1] - hh, c[0] + hw, c[1] + hh)
-                  val off = hypot(c[0] - 0.5f, c[1] - 0.5f)
-                  val now = System.currentTimeMillis()
-                  if (!zoomedIn) {
-                      if (off < 0.035f) {
-                          if (alignedSince == 0L) alignedSince = now
-                          else if (now - alignedSince > 350) zoomIn()
-                      } else alignedSince = 0L
-                      overlay.aligned = false
-                  } else {
-                      overlay.aligned = off < 0.06f
-                  }
-                  overlay.invalidate()
-              }
-
-              private fun zoomIn() {
-                  val p = plan ?: return
-                  zoomedIn = true
-                  camera?.cameraControl?.setZoomRatio(targetZoom)
-                  say(if (p.tip.isNotBlank()) p.tip else "Enquadrado — carrega em ●")
-              }
-
-              private fun resetPlan() {
-                  plan = null
-                  zoomedIn = false
-                  alignedSince = 0L
-                  seen.clear()
-                  overlay.target = null
-                  overlay.aligned = false
-                  overlay.invalidate()
-                  camera?.cameraControl?.setZoomRatio(1f)
-              }
-
-              // ---------- Find the shot ----------
-              private fun findShot() {
-                  if (busy) return
-                  val cam = camera ?: return
-                  val old = plan
-                  if (old != null) seen.add(old.subject) else seen.clear()
-                  plan = null
-                  zoomedIn = false
-                  alignedSince = 0L
-                  overlay.target = null
-                  overlay.invalidate()
-                  busy = true
-                  aiBtn.isEnabled = false
-                  say("A procurar a foto…")
-                  cam.cameraControl.setZoomRatio(1f)
-                  ui.postDelayed({
-                      val bmp = previewView.bitmap
-                      if (bmp == null) {
-                          busy = false
-                          aiBtn.isEnabled = true
-                          say("Ainda sem imagem da câmara.")
-                      } else {
-                          rot0 = rot.copyOf()
-                          val small = scale(bmp, 1024)
-                          val pr = prompt(small.width, small.height)
-                          io.execute {
-                              val t0 = System.currentTimeMillis()
-                              val p0 = analyse(small, pr)
-                              val dt = (System.currentTimeMillis() - t0) / 1000.0
-                              val p = p0.copy(source = p0.source + String.format(Locale.US, " · %.1f s", dt))
-                              ui.post {
-                                  busy = false
-                                  aiBtn.isEnabled = true
-                                  applyPlan(p)
-                              }
-                          }
-                      }
-                  }, 450)
-              }
-
-              private fun applyPlan(p: Plan) {
-                  plan = p
-                  targetZoom = clampZoom(1f / max(p.shot.w, p.shot.h))
-                  val base = "${p.subject} (${p.source}): alinha o centro com o alvo"
-                  say(if (p.note.isNotBlank()) "${p.note}\n$base" else base)
-                  updateOverlay()
-              }
-
-              /** Cloud Gemini, trying each configured model. Returns the plan, or null and why not. */
-              private fun cloud(bmp: Bitmap, pr: String): Pair<Plan?, String> {
-                  val key = pref("key", "").trim()
-                  var note = ""
-                  val st = gState
-                  if (key.isNotEmpty() && (st == G_DOWN || st == G_BADKEY)) {
-                      note = if (st == G_DOWN) "Gemini em baixo." else "Chave do Gemini inválida."
-                  } else if (key.isNotEmpty()) {
-                      // start with the model the health check found working
-                      val list = models().sortedBy { if (it == gModel) 0 else 1 }
-                      val b64 = jpegB64(bmp)
-                      val now = System.currentTimeMillis()
-                      for ((i, m) in list.withIndex()) {
-                          val until = paused[m] ?: 0L
-                          if (now < until) {
-                              note = "Gemini em pausa (estava sobrecarregado)."
-                              continue
-                          }
-                          try {
-                              val res = gemini(key, m, b64, pr)
-                              if (gState != G_OK || gModel != m) setGemini(G_OK, m)
-                              val n = if (i == 0) "" else "Modelo principal indisponível; usei o de reserva."
-                              return Pair(fromGemini(res, "Gemini · $m", n), "")
-                          } catch (e: GErr) {
-                              note = "Gemini $m: ${e.human}."
-                              if (e.fatal) { setGemini(G_BADKEY); break }
-                              paused[m] = System.currentTimeMillis() + PAUSE_MS
-                              if (i == list.size - 1) setGemini(G_DOWN)
-                          } catch (e: Exception) {
-                              note = "Resposta inesperada do Gemini."
-                          }
-                      }
-                  } else {
-                      note = if (pref("engine", "auto") == "gemini") "Sem chave do Gemini." else ""
-                  }
-                  return Pair(null, note)
-              }
-
-              /** Who answers depends on the engine chosen in the settings; every path ends in the local AI. */
-              private fun analyse(bmp: Bitmap, pr: String): Plan {
-                  val eng = pref("engine", "auto")
-                  val notes = ArrayList<String>()
-                  if (eng == "auto" || eng == "gemini") {
-                      val r = cloud(bmp, pr)
-                      val p = r.first
-                      if (p != null) return p
-                      if (r.second.isNotBlank()) notes.add(r.second)
-                  }
-                  if (eng == "auto" || eng == "nano") {
-                      val r = nanoPlan(bmp, pr)
-                      val p = r.first
-                      if (p != null) return p.copy(note = (notes + p.note).filter { it.isNotBlank() }.joinToString(" "))
-                      if (r.second.isNotBlank()) notes.add(r.second)
-                  }
-                  notes.add("Usei a IA local.")
-                  return local(bmp, notes.joinToString(" "))
-              }
-
-              /** Gemini Nano on the phone. Where its boxes are unusable, ML Kit finds the subject and Nano keeps the rest. */
-              private fun nanoPlan(bmp: Bitmap, pr: String): Pair<Plan?, String> {
-                  if (nState != FeatureStatus.AVAILABLE) {
-                      return Pair(null, if (pref("engine", "auto") == "nano") "Gemini Nano " + Nano.statusText(nState) + "." else "")
-                  }
-                  return try {
-                      val t = Nano.ask(scale(bmp, 768), pr, persona().temp.toFloat(), 20000)
-                      val a = t.indexOf('{')
-                      val z = t.lastIndexOf('}')
-                      if (a < 0 || z < a) {
-                          Pair(null, "Gemini Nano respondeu fora do formato.")
-                      } else {
-                          val j = JSONObject(t.substring(a, z + 1))
-                          val p = fromGemini(j, "Gemini Nano", "")
-                          if (box(j.optJSONArray("subject_box")) == null && box(j.optJSONArray("shot_box")) == null) {
-                              val loc = local(bmp, "")
-                              Pair(loc.copy(subject = p.subject, tip = p.tip, filter = p.filter, border = p.border, source = "Gemini Nano + ML Kit"), "")
-                          } else {
-                              Pair(p, "")
-                          }
-                      }
-                  } catch (e: Exception) {
-                      Pair(null, "Gemini Nano falhou (" + e.javaClass.simpleName + ").")
-                  }
-              }
-
-              private fun prompt(w: Int, h: Int): String {
-                  val p = persona()
-                  val extra = pref("extra", "").trim().take(400)
-                  val avoid = if (seen.isEmpty()) "" else
-                      "\nThe user asked for another option: choose something different from " +
-                          seen.takeLast(4).joinToString(", ") { "\"" + it + "\"" } + "."
-                  return "You are a photo director helping someone take a striking phone photo. " +
-                      "The image is the live camera view (portrait, ${w}x${h}).\n" +
-                      p.text +
-                      (if (extra.isNotEmpty()) "\nThe photographer's own direction (follow it): $extra" else "") + "\n" +
-                      "Pick ONE subject in it that would make the most beautiful photo when isolated with a telephoto lens (2x to 5x zoom). " +
-                      "Favour: light (sun, golden light, glowing windows, light through leaves), reflections, silhouettes, strong shapes, one isolated object, textures, leading lines that end in something. " +
-                      "Avoid: things cut by the image edge, clutter, plain empty sky. Never pick a lamp, street light or light bulb as the subject; choose what the light falls on, its glow on a surface, or its reflection.\n" +
-                      "Then propose the shot: a rectangle with width:height = 0.750 that contains the whole subject, places it with a composition rule, " +
-                      "and covers roughly ${p.cover} of the image width. Leave space in front of people or animals in the direction they look or move." +
-                      avoid + "\n" +
-                      "Finally choose the look of the finished photo to match its mood (do not default to the same every time). " +
-                      "filter, one of: clean (natural), vivo (punchy colour), quente (warm), claro (bright and airy), suave (soft, faded), " +
-                      "dourado (golden glow), cinema (teal and orange), pelicula (film), pb (black and white), noir (dramatic black and white). " +
-                      "border, one of: none, white (thin white), galeria (museum mat), polaroid (instant photo with handwritten caption), ficha (white with camera details).\n" +
-                      "Answer with JSON only:\n" +
-                      "{\"subject\":\"short description in European Portuguese, max 4 words, lowercase\"," +
-                      "\"subject_box\":[ymin,xmin,ymax,xmax],\"shot_box\":[ymin,xmin,ymax,xmax]," +
-                      "\"rule\":\"tercos|aurea|centro|simetrico|diagonal|minimal|moldura\"," +
-                      "\"tip\":\"short instruction in European Portuguese, max 6 words\",\"filter\":\"one id\",\"border\":\"one id\"}\n" +
-                      "Coordinates are integers normalized to 0-1000."
-              }
-
-              /** POST to generateContent; returns the body of a 2xx answer or throws GErr with a human message. */
-              private fun post(key: String, model: String, body: JSONObject, connectMs: Int, readMs: Int): String {
-                  val c = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent").openConnection() as HttpURLConnection
-                  try {
-                      c.requestMethod = "POST"
-                      c.connectTimeout = connectMs
-                      c.readTimeout = readMs
-                      c.doOutput = true
-                      c.setRequestProperty("content-type", "application/json")
-                      c.setRequestProperty("x-goog-api-key", key)
-                      c.outputStream.use { it.write(body.toString().toByteArray()) }
-                      val code = c.responseCode
-                      val stream = if (code in 200..299) c.inputStream else c.errorStream
-                      val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
-                      if (code !in 200..299) {
-                          val m = try { JSONObject(text).getJSONObject("error").optString("message") } catch (e: Exception) { "" }
-                          throw when {
-                              code == 429 -> GErr("limite gratuito atingido (429)", false)
-                              code >= 500 -> GErr("sobrecarregado ($code)", false)
-                              code == 404 -> GErr("o modelo não existe (404)", false)
-                              code == 400 && m.lowercase().contains("api key") -> GErr("Gemini: a chave não é válida.", true)
-                              code == 401 || code == 403 -> GErr("Gemini: a chave não tem acesso.", true)
-                              else -> GErr("recusou o pedido ($code): " + m.take(80), false)
-                          }
-                      }
-                      return text
-                  } catch (e: SocketTimeoutException) {
-                      throw GErr("não respondeu a tempo", false)
-                  } catch (e: IOException) {
-                      throw GErr("sem ligação", false)
-                  } finally {
-                      c.disconnect()
-                  }
-              }
-
-              private fun gemini(key: String, model: String, b64: String, pr: String): JSONObject {
-                  val parts = JSONArray()
-                      .put(JSONObject().put("text", pr))
-                      .put(JSONObject().put("inline_data", JSONObject().put("mime_type", "image/jpeg").put("data", b64)))
-                  val body = JSONObject()
-                      .put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", parts)))
-                      .put("generationConfig", JSONObject().put("responseMimeType", "application/json").put("temperature", persona().temp))
-                  val text = post(key, model, body, 4000, 10000)
-                  val cand = JSONObject(text).getJSONArray("candidates").getJSONObject(0)
-                  val ps = cand.getJSONObject("content").getJSONArray("parts")
-                  val sb = StringBuilder()
-                  for (i in 0 until ps.length()) sb.append(ps.getJSONObject(i).optString("text"))
-                  val t = sb.toString()
-                  val a = t.indexOf('{')
-                  val z = t.lastIndexOf('}')
-                  if (a < 0 || z < a) throw GErr("Resposta inesperada do Gemini.", false)
-                  return JSONObject(t.substring(a, z + 1))
-              }
-
-              private fun box(a: JSONArray?): Box? {
-                  if (a == null || a.length() < 4) return null
-                  fun n(i: Int): Float = (a.optDouble(i, 0.0) / 1000.0).toFloat().coerceIn(0f, 1f)
-                  val y0 = min(n(0), n(2))
-                  val y1 = max(n(0), n(2))
-                  val x0 = min(n(1), n(3))
-                  val x1 = max(n(1), n(3))
-                  if (x1 - x0 < 0.01f || y1 - y0 < 0.01f) return null
-                  return Box(x0, y0, x1 - x0, y1 - y0)
-              }
-
-              private fun fromGemini(r: JSONObject, source: String, note: String): Plan {
-                  val subj = box(r.optJSONArray("subject_box"))
-                  val shot0 = box(r.optJSONArray("shot_box"))
-                  val name = r.optString("subject", "motivo").lowercase().take(36).ifBlank { "motivo" }
-                  val tip = r.optString("tip", "").take(60)
-                  val filter = r.optString("filter", "clean").let { if (Look.validFilter(it)) it else "clean" }
-                  val border = r.optString("border", "none").let { if (Look.validBorder(it)) it else "none" }
-                  return Plan(name, subj, fitShot(shot0, subj), r.optString("rule", "tercos"), tip, source, note, filter, border)
-              }
-
-              /**
-               * The AI's coordinates are approximate. Turn its proposal into a clean 3:4 frame that
-               * stays inside the image and never cuts the subject, moving it as little as possible.
-               */
-              private fun fitShot(shot: Box?, subj: Box?): Box {
-                  val p = persona()
-                  var s: Float
-                  var cx: Float
-                  var cy: Float
-                  when {
-                      shot != null -> { s = sqrt(shot.w * shot.h); cx = shot.cx; cy = shot.cy }
-                      subj != null -> { s = max(subj.w, subj.h) * 1.8f; cx = subj.cx; cy = subj.cy }
-                      else -> { s = 0.5f; cx = 0.5f; cy = 0.5f }
-                  }
-                  if (subj != null) s = max(s, max(subj.w, subj.h) * 1.12f)
-                  s = s.coerceIn(p.lo, p.hi)
-                  if (subj != null) {
-                      val m = 0.04f * s
-                      val loX = subj.x + subj.w + m - s / 2f
-                      val hiX = subj.x - m + s / 2f
-                      cx = if (loX <= hiX) cx.coerceIn(loX, hiX) else subj.cx
-                      val loY = subj.y + subj.h + m - s / 2f
-                      val hiY = subj.y - m + s / 2f
-                      cy = if (loY <= hiY) cy.coerceIn(loY, hiY) else subj.cy
-                  }
-                  cx = cx.coerceIn(s / 2f, 1f - s / 2f)
-                  cy = cy.coerceIn(s / 2f, 1f - s / 2f)
-                  return Box(cx - s / 2f, cy - s / 2f, s, s)
-              }
-
-              /** Free, offline fallback: ML Kit finds the main object, the frame follows the rule of thirds. */
-              private fun local(bmp: Bitmap, note: String): Plan {
-                  var subj: Box? = null
-                  var name = "motivo"
-                  try {
-                      val objs = Tasks.await(detector.process(InputImage.fromBitmap(bmp, 0)), 8, TimeUnit.SECONDS)
-                      val bw = bmp.width.toFloat()
-                      val bh = bmp.height.toFloat()
-                      val best = objs.maxByOrNull { o ->
-                          val r = o.boundingBox
-                          val area = r.width() * r.height() / (bw * bh)
-                          val d = hypot(r.exactCenterX() / bw - 0.5f, r.exactCenterY() / bh - 0.5f)
-                          area * (1.2f - d)
-                      }
-                      if (best != null) {
-                          val r = best.boundingBox
-                          subj = Box(
-                              (r.left / bw).coerceIn(0f, 1f), (r.top / bh).coerceIn(0f, 1f),
-                              (r.width() / bw).coerceIn(0.01f, 1f), (r.height() / bh).coerceIn(0.01f, 1f)
-                          )
-                          name = labelPt(best.labels.firstOrNull()?.text)
-                      }
-                  } catch (e: Exception) {
-                      // no detection: fall back to the centre
-                  }
-                  val sj = subj
-                  val p = persona()
-                  val shot = if (sj != null) {
-                      val s = (max(sj.w, sj.h) * 2f).coerceIn(p.lo, p.hi)
-                      val cx = if (sj.cx < 0.5f) sj.cx + s / 6f else sj.cx - s / 6f
-                      val cy = sj.cy + s / 6f
-                      fitShot(Box(cx - s / 2f, cy - s / 2f, s, s), sj)
-                  } else {
-                      fitShot(null, null)
-                  }
-                  return Plan(name, sj, shot, "tercos", "Motivo num ponto forte", "IA local · ML Kit", note)
-              }
-
-              private fun labelPt(l: String?): String = when (l) {
-                  "Food" -> "comida"
-                  "Plant" -> "planta"
-                  "Place" -> "lugar"
-                  "Fashion good" -> "roupa"
-                  "Home good" -> "objeto"
-                  else -> "motivo"
-              }
-
-              private fun jpegB64(b: Bitmap): String {
-                  val o = ByteArrayOutputStream()
-                  b.compress(Bitmap.CompressFormat.JPEG, 85, o)
-                  return Base64.encodeToString(o.toByteArray(), Base64.NO_WRAP)
-              }
-
-              private fun scale(b: Bitmap, maxSide: Int): Bitmap {
+              private fun scaleTo(b: Bitmap, maxSide: Int): Bitmap {
                   val k = min(1f, maxSide.toFloat() / max(b.width, b.height))
                   if (k >= 1f) return b
                   return Bitmap.createScaledBitmap(b, (b.width * k).roundToInt(), (b.height * k).roundToInt(), true)
               }
 
-              // ---------- Capture and result ----------
-              private fun takePhoto() {
-                  val ic = imageCapture ?: return
-                  val z = curZoom()
-                  val p = plan
-                  shutter.isEnabled = false
-                  say("A tirar a foto…")
-                  ic.takePicture(io, object : ImageCapture.OnImageCapturedCallback() {
+              private fun jpeg(b: Bitmap, q: Int): String {
+                  val o = ByteArrayOutputStream()
+                  b.compress(Bitmap.CompressFormat.JPEG, q, o)
+                  return Base64.encodeToString(o.toByteArray(), Base64.NO_WRAP)
+              }
+
+              /** About 12 small frames a second go to the page for tracking; the sharp one is kept for grab(). */
+              private fun onFrame(img: ImageProxy) {
+                  try {
+                      val now = SystemClock.uptimeMillis()
+                      if (now - lastPush < 80) return
+                      lastPush = now
+                      val up = upright(img.toBitmap(), img.imageInfo.rotationDegrees)
+                      synchronized(frameLock) { latest = up }
+                      if (!pageReady) return
+                      val b64 = jpeg(scaleTo(up, 480), 70)
+                      val z = camera?.cameraInfo?.zoomState?.value?.zoomRatio ?: 1f
+                      js("window.__nf&&__nf('data:image/jpeg;base64,$b64',$z)")
+                  } catch (e: Exception) {
+                      // skip this frame
+                  } finally {
+                      img.close()
+                  }
+              }
+
+              private fun capture(id: String, x: Double, y: Double, w: Double, h: Double) {
+                  val ic = imageCapture
+                  if (ic == null) { js("window.__photo&&__photo('$id','')"); return }
+                  ic.takePicture(photoExec, object : ImageCapture.OnImageCapturedCallback() {
                       override fun onCaptureSuccess(image: ImageProxy) {
                           try {
                               val deg = image.imageInfo.rotationDegrees
-                              var bmp = image.toBitmap()
+                              val raw = image.toBitmap()
                               image.close()
-                              if (deg != 0) {
-                                  val m = Matrix()
-                                  m.postRotate(deg.toFloat())
-                                  bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
-                              }
-                              val full = bmp
-                              val small = scale(full, 1400)
-                              ui.post {
-                                  shutter.isEnabled = true
-                                  showResult(full, small, z, p)
-                              }
+                              val bmp = upright(raw, deg)
+                              val cx = (x * bmp.width).roundToInt().coerceIn(0, bmp.width - 1)
+                              val cy = (y * bmp.height).roundToInt().coerceIn(0, bmp.height - 1)
+                              val cw = (w * bmp.width).roundToInt().coerceIn(1, bmp.width - cx)
+                              val ch = (h * bmp.height).roundToInt().coerceIn(1, bmp.height - cy)
+                              val crop = Bitmap.createBitmap(bmp, cx, cy, cw, ch)
+                              val f = File(shotsDir(), "$id.jpg")
+                              FileOutputStream(f).use { crop.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+                              js("window.__photo&&__photo('$id','https://appassets.androidplatform.net/shots/$id.jpg')")
                           } catch (e: Throwable) {
-                              ui.post { shutter.isEnabled = true; say("Não consegui processar a foto: ${e.message}") }
+                              js("window.__photo&&__photo('$id','')")
                           }
                       }
 
                       override fun onError(exception: ImageCaptureException) {
-                          ui.post { shutter.isEnabled = true; say("Não consegui tirar a foto: ${exception.message}") }
+                          js("window.__photo&&__photo('$id','')")
                       }
                   })
               }
 
-              private fun strip(items: List<Pair<String, String>>, map: HashMap<String, TextView>, pick: (String) -> Unit): View {
-                  map.clear()
-                  val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(8), dp(4), dp(8), dp(4)) }
-                  for ((id, label) in items) {
-                      val b = TextView(this).apply {
-                          text = label
-                          textSize = 14f
-                          setPadding(dp(14), dp(8), dp(14), dp(8))
-                          setOnClickListener { pick(id) }
+              // ---------- What the page can ask for ----------
+              inner class Bridge {
+                  @JavascriptInterface
+                  fun info(): String {
+                      val z = camera?.cameraInfo?.zoomState?.value
+                      return JSONObject()
+                          .put("minZoom", (z?.minZoomRatio ?: 1f).toDouble())
+                          .put("maxZoom", (z?.maxZoomRatio ?: 1f).toDouble())
+                          .put("zoom", (z?.zoomRatio ?: 1f).toDouble())
+                          .put("nano", nanoStatus())
+                          .toString()
+                  }
+
+                  @JavascriptInterface
+                  fun startCamera() {
+                      pageReady = true
+                      ui.post {
+                          if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) bindCamera()
+                          else askCam.launch(Manifest.permission.CAMERA)
                       }
-                      map[id] = b
-                      line.addView(b, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(6) })
                   }
-                  return HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(line) }
-              }
 
-              private fun showResult(full: Bitmap, small: Bitmap, z: Float, p: Plan?) {
-                  resFull = full
-                  resSmall = small
-                  resFilter = p?.filter ?: "clean"
-                  resBorder = p?.border ?: "none"
-                  resCaption = p?.subject ?: ""
-                  resInfo = "Enquadra · " + String.format(Locale.US, "%.1fx", z) + " · " +
-                      SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.US).format(Date())
-                  val layer = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL
-                      setBackgroundColor(Color.BLACK)
-                      isClickable = true
+                  @JavascriptInterface
+                  fun setZoom(z: Double) {
+                      ui.post {
+                          val st = camera?.cameraInfo?.zoomState?.value
+                          if (st != null) camera?.cameraControl?.setZoomRatio(z.toFloat().coerceIn(st.minZoomRatio, st.maxZoomRatio))
+                      }
                   }
-                  resImg = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
-                  val mp = String.format(Locale.US, "%.1f MP", full.width.toLong() * full.height / 1e6)
-                  val who = if (p != null) " · look sugerido por " + p.source.substringBefore(" ·") else ""
-                  val info = TextView(this).apply {
-                      text = "${full.width}x${full.height} ($mp) · " + String.format(Locale.US, "%.1fx", z) + who
-                      setTextColor(Color.LTGRAY)
-                      textSize = 12f
-                      gravity = Gravity.CENTER
-                      setPadding(dp(8), dp(6), dp(8), dp(6))
+
+                  @JavascriptInterface
+                  fun setPreviewRect(x: Double, y: Double, w: Double, h: Double) {
+                      ui.post {
+                          val d = resources.displayMetrics.density
+                          val lp = FrameLayout.LayoutParams(max(1, (w * d).roundToInt()), max(1, (h * d).roundToInt()))
+                          lp.leftMargin = (x * d).roundToInt()
+                          lp.topMargin = (y * d).roundToInt()
+                          preview.layoutParams = lp
+                          preview.invalidateOutline()
+                      }
                   }
-                  layer.addView(View(this), LinearLayout.LayoutParams(-1, dp(32)))
-                  layer.addView(resImg, LinearLayout.LayoutParams(-1, 0, 1f))
-                  layer.addView(info)
-                  layer.addView(strip(Look.FILTERS, filterBtns) { id -> resFilter = id; renderResult() })
-                  layer.addView(strip(Look.BORDERS, borderBtns) { id -> resBorder = id; renderResult() })
-                  val row = LinearLayout(this).apply {
-                      orientation = LinearLayout.HORIZONTAL
-                      gravity = Gravity.CENTER
-                      setPadding(0, dp(8), 0, dp(24))
+
+                  @JavascriptInterface
+                  fun previewVisible(v: Boolean) {
+                      ui.post { preview.visibility = if (v) View.VISIBLE else View.INVISIBLE }
                   }
-                  val discard = Button(this).apply { text = "Descartar"; setOnClickListener { closeResult(); say("Foto descartada.") } }
-                  val save = Button(this).apply { text = "Guardar"; setOnClickListener { saveResult() } }
-                  row.addView(discard, LinearLayout.LayoutParams(dp(140), dp(56)).apply { marginEnd = dp(24) })
-                  row.addView(save, LinearLayout.LayoutParams(dp(140), dp(56)))
-                  layer.addView(row)
-                  root.addView(layer, FrameLayout.LayoutParams(-1, -1))
-                  resultLayer = layer
-                  renderResult()
-              }
 
-              private fun renderResult() {
-                  val s = resSmall ?: return
-                  try {
-                      resImg.setImageBitmap(Look.render(s, resFilter, resBorder, resCaption, resInfo))
-                  } catch (e: Throwable) {
-                      say("Erro a aplicar o filtro: ${e.message}")
+                  @JavascriptInterface
+                  fun grab(maxSide: Int): String {
+                      val b = synchronized(frameLock) { latest } ?: return ""
+                      return "data:image/jpeg;base64," + jpeg(scaleTo(b, maxSide), 88)
                   }
-                  for ((id, b) in filterBtns) mark(b, id == resFilter)
-                  for ((id, b) in borderBtns) mark(b, id == resBorder)
-              }
 
-              private fun mark(b: TextView, on: Boolean) {
-                  b.setBackgroundColor(if (on) Color.rgb(255, 214, 10) else Color.argb(50, 255, 255, 255))
-                  b.setTextColor(if (on) Color.BLACK else Color.WHITE)
-              }
+                  @JavascriptInterface
+                  fun takePhoto(id: String, x: Double, y: Double, w: Double, h: Double) {
+                      ui.post { capture(id, x, y, w, h) }
+                  }
 
-              private fun closeResult() {
-                  resultLayer?.let { root.removeView(it) }
-                  resultLayer = null
-                  resSmall = null
-                  resFull = null
-                  resetPlan()
-              }
-
-              private fun saveResult() {
-                  val full = resFull ?: return
-                  val f = resFilter
-                  val b = resBorder
-                  val cap = resCaption
-                  val info = resInfo
-                  closeResult()
-                  say("A guardar…")
-                  io.execute {
-                      try {
-                          val out = Look.render(full, f, b, cap, info)
-                          val name = "Enquadra_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                  @JavascriptInterface
+                  fun saveJpeg(name: String, b64: String): String {
+                      return try {
+                          val bytes = Base64.decode(b64, Base64.DEFAULT)
                           val cv = ContentValues().apply {
                               put(MediaStore.MediaColumns.DISPLAY_NAME, name)
                               put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
                               put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/Enquadra")
                           }
-                          val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)
-                              ?: throw IOException("não consegui criar o ficheiro")
-                          contentResolver.openOutputStream(uri)?.use { out.compress(Bitmap.CompressFormat.JPEG, 95, it) }
-                          lastUri = uri
-                          val w = out.width
-                          val h = out.height
-                          ui.post { say("Guardada em Imagens › Enquadra (${w}x${h}). ▣ para ver.") }
-                      } catch (e: Throwable) {
-                          ui.post { say("Não consegui guardar: ${e.message}") }
+                          val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv) ?: return "err"
+                          contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+                          "ok"
+                      } catch (e: Exception) {
+                          "err"
                       }
                   }
-              }
 
-              // ---------- Settings ----------
-              private fun openSettings() {
-                  val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), 0) }
-                  fun label(t: String) = TextView(this).apply { text = t; setPadding(0, dp(14), 0, dp(2)) }
-                  val key = EditText(this).apply {
-                      setText(pref("key", "")); hint = "AIza…"
-                      inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-                      setSingleLine(true)
-                  }
-                  val m1 = EditText(this).apply { setText(pref("model1", M1)); setSingleLine(true) }
-                  val m2 = EditText(this).apply { setText(pref("model2", M2)); setSingleLine(true) }
-                  val m3 = EditText(this).apply { setText(pref("model3", M3)); setSingleLine(true) }
-                  val ids = PERSONAS.keys.toList()
-                  val sp = Spinner(this)
-                  sp.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, ids.map { PERSONAS.getValue(it).label })
-                  sp.setSelection(max(0, ids.indexOf(pref("persona", "criativo"))))
-                  val extra = EditText(this).apply { setText(pref("extra", "")); hint = "ex.: gosto de silhuetas; evita carros"; setMinLines(2) }
-                  val engIds = listOf("auto", "gemini", "nano", "local")
-                  val engLabels = listOf("Automático: Gemini → Nano → local", "Só Gemini (nuvem)", "Só Gemini Nano (no telemóvel)", "Só IA local (ML Kit)")
-                  val spEng = Spinner(this)
-                  spEng.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, engLabels)
-                  spEng.setSelection(max(0, engIds.indexOf(pref("engine", "auto"))))
-                  val nanoTxt = TextView(this).apply {
-                      text = "Gemini Nano: " + Nano.statusText(nState) + (if (nModel.isNotEmpty()) " ($nModel)" else "")
-                      setPadding(0, dp(6), 0, dp(2))
-                  }
-                  val nanoBtn = Button(this).apply {
-                      text = "Descarregar Gemini Nano"
-                      visibility = if (nState == FeatureStatus.DOWNLOADABLE) View.VISIBLE else View.GONE
-                      setOnClickListener { isEnabled = false; downloadNano() }
+                  @JavascriptInterface
+                  fun nanoStatus(): String = when (nState) {
+                      FeatureStatus.AVAILABLE -> "ready"
+                      FeatureStatus.DOWNLOADABLE -> "downloadable"
+                      FeatureStatus.DOWNLOADING -> "downloading"
+                      Nano.UNKNOWN -> "checking"
+                      else -> "unavailable"
                   }
 
-                  box.addView(label("Quem escolhe a foto"))
-                  box.addView(spEng)
-                  box.addView(nanoTxt)
-                  box.addView(nanoBtn)
-                  box.addView(label("Chave do Gemini (cola aqui)"))
-                  box.addView(key)
-                  box.addView(label("Modelo principal"))
-                  box.addView(m1)
-                  box.addView(label("Modelo de reserva (se o principal falhar)"))
-                  box.addView(m2)
-                  box.addView(label("2.º modelo de reserva"))
-                  box.addView(m3)
-                  box.addView(label("Olhar do fotógrafo"))
-                  box.addView(sp)
-                  box.addView(label("Instruções tuas para a IA"))
-                  box.addView(extra)
-                  box.addView(TextView(this).apply {
-                      text = "A app verifica o Gemini ao abrir e de 2 em 2 minutos (toca no indicador para verificar já). Em baixo, o ✦ usa logo a IA local (ML Kit), que funciona sem internet."
-                      textSize = 12f
-                      setPadding(0, dp(12), 0, dp(8))
-                  })
-
-                  AlertDialog.Builder(this)
-                      .setTitle("Definições")
-                      .setView(ScrollView(this).apply { addView(box) })
-                      .setPositiveButton("Guardar") { _, _ ->
-                          prefs.edit()
-                              .putString("key", key.text.toString().trim())
-                              .putString("model1", m1.text.toString().trim())
-                              .putString("model2", m2.text.toString().trim())
-                              .putString("model3", m3.text.toString().trim())
-                              .putString("persona", ids[sp.selectedItemPosition.coerceIn(0, ids.size - 1)])
-                              .putString("extra", extra.text.toString().trim())
-                              .putString("engine", engIds[spEng.selectedItemPosition.coerceIn(0, engIds.size - 1)])
-                              .apply()
-                          paused.clear()
-                          renderChip()
-                          checkGemini()
+                  @JavascriptInterface
+                  fun nanoDownload() {
+                      nState = FeatureStatus.DOWNLOADING
+                      nanoExec.execute {
+                          Nano.download { m -> js("window.__nanoProgress&&__nanoProgress(" + JSONObject.quote(m) + ")") }
+                          nState = Nano.status()
+                          js("window.__nanoProgress&&__nanoProgress(" + JSONObject.quote(Nano.statusText(nState)) + ")")
                       }
-                      .setNegativeButton("Cancelar", null)
-                      .show()
-              }
-          }
-          EOF
-
-          cat > app/src/main/java/pt/filipe/enquadra/Look.kt <<'EOF'
-          package pt.filipe.enquadra
-
-          import android.graphics.Bitmap
-          import android.graphics.Canvas
-          import android.graphics.Color
-          import android.graphics.ColorMatrix
-          import android.graphics.ColorMatrixColorFilter
-          import android.graphics.Paint
-          import android.graphics.Typeface
-          import kotlin.math.min
-
-          /** Filters (colour matrices) and borders for the finished photo. */
-          object Look {
-              val FILTERS = listOf(
-                  "clean" to "Natural", "vivo" to "Vivo", "quente" to "Quente", "claro" to "Claro", "suave" to "Suave",
-                  "dourado" to "Dourado", "cinema" to "Cinema", "pelicula" to "Película", "pb" to "P&B", "noir" to "Noir"
-              )
-              val BORDERS = listOf(
-                  "none" to "Sem moldura", "white" to "Branca", "galeria" to "Galeria", "polaroid" to "Polaroid", "ficha" to "Ficha"
-              )
-
-              fun validFilter(id: String) = FILTERS.any { it.first == id }
-              fun validBorder(id: String) = BORDERS.any { it.first == id }
-
-              private fun contrast(c: Float): ColorMatrix {
-                  val t = 128f * (1f - c)
-                  return ColorMatrix(floatArrayOf(c, 0f, 0f, 0f, t, 0f, c, 0f, 0f, t, 0f, 0f, c, 0f, t, 0f, 0f, 0f, 1f, 0f))
-              }
-
-              private fun sat(s: Float) = ColorMatrix().apply { setSaturation(s) }
-              private fun scale(r: Float, g: Float, b: Float) = ColorMatrix().apply { setScale(r, g, b, 1f) }
-              private fun offset(r: Float, g: Float, b: Float) =
-                  ColorMatrix(floatArrayOf(1f, 0f, 0f, 0f, r, 0f, 1f, 0f, 0f, g, 0f, 0f, 1f, 0f, b, 0f, 0f, 0f, 1f, 0f))
-
-              /** Applies the matrices in the order given. */
-              private fun chain(vararg m: ColorMatrix): ColorMatrix {
-                  val out = ColorMatrix()
-                  for (x in m) out.postConcat(x)
-                  return out
-              }
-
-              private fun matrix(id: String): ColorMatrix? = when (id) {
-                  "vivo" -> chain(sat(1.35f), contrast(1.08f))
-                  "quente" -> chain(scale(1.08f, 1.0f, 0.9f), sat(1.05f))
-                  "claro" -> chain(offset(18f, 18f, 18f), contrast(0.94f), sat(0.95f))
-                  "suave" -> chain(contrast(0.82f), offset(14f, 14f, 14f), sat(0.8f))
-                  "dourado" -> chain(scale(1.1f, 1.02f, 0.82f), offset(6f, 3f, 0f), sat(1.1f))
-                  "cinema" -> chain(contrast(1.12f), scale(1.06f, 1.0f, 0.94f), offset(-6f, 4f, 10f), sat(1.05f))
-                  "pelicula" -> chain(contrast(0.9f), sat(0.82f), scale(1.04f, 1.0f, 0.94f), offset(10f, 8f, 6f))
-                  "pb" -> chain(sat(0f), contrast(1.05f))
-                  "noir" -> chain(sat(0f), contrast(1.4f), offset(-10f, -10f, -10f))
-                  else -> null
-              }
-
-              /** Border widths as fractions of the photo's short side: left, top, right, bottom. */
-              private fun margins(id: String): FloatArray = when (id) {
-                  "white" -> floatArrayOf(0.03f, 0.03f, 0.03f, 0.03f)
-                  "galeria" -> floatArrayOf(0.09f, 0.09f, 0.09f, 0.11f)
-                  "polaroid" -> floatArrayOf(0.05f, 0.05f, 0.05f, 0.24f)
-                  "ficha" -> floatArrayOf(0.03f, 0.03f, 0.03f, 0.12f)
-                  else -> floatArrayOf(0f, 0f, 0f, 0f)
-              }
-
-              fun render(src: Bitmap, filter: String, border: String, caption: String, info: String): Bitmap {
-                  val s = min(src.width, src.height).toFloat()
-                  val m = margins(border)
-                  val l = (s * m[0]).toInt()
-                  val t = (s * m[1]).toInt()
-                  val r = (s * m[2]).toInt()
-                  val b = (s * m[3]).toInt()
-                  val out = Bitmap.createBitmap(src.width + l + r, src.height + t + b, Bitmap.Config.ARGB_8888)
-                  val c = Canvas(out)
-                  c.drawColor(if (border == "polaroid") Color.rgb(250, 249, 245) else Color.WHITE)
-                  val p = Paint(Paint.FILTER_BITMAP_FLAG)
-                  matrix(filter)?.let { p.colorFilter = ColorMatrixColorFilter(it) }
-                  c.drawBitmap(src, l.toFloat(), t.toFloat(), p)
-                  if (border == "polaroid" && caption.isNotBlank()) {
-                      val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                          color = Color.rgb(60, 60, 64)
-                          textSize = b * 0.30f
-                          typeface = Typeface.create("cursive", Typeface.NORMAL)
-                          textAlign = Paint.Align.CENTER
-                      }
-                      c.drawText(caption, out.width / 2f, t + src.height + b * 0.58f, tp)
                   }
-                  if (border == "ficha") {
-                      val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                          color = Color.rgb(70, 70, 74)
-                          textSize = b * 0.26f
-                          typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+
+                  @JavascriptInterface
+                  fun nanoAsk(id: String, prompt: String, b64: String) {
+                      nanoExec.execute {
+                          var text = ""
+                          var err = ""
+                          try {
+                              val bytes = Base64.decode(b64, Base64.DEFAULT)
+                              val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                              text = Nano.ask(scaleTo(bmp, 768), prompt, 0.6f, 20000)
+                          } catch (e: Exception) {
+                              err = e.javaClass.simpleName + ": " + (e.message ?: "")
+                          }
+                          js("window.__nano&&__nano(" + JSONObject.quote(id) + "," + JSONObject.quote(text) + "," + JSONObject.quote(err) + ")")
                       }
-                      c.drawText(info, l.toFloat(), t + src.height + b * 0.6f, tp)
                   }
-                  return out
               }
           }
           EOF
@@ -1449,5 +595,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: enquadra-apk-0.3
+          name: enquadra-apk-0.4
           path: enquadra/app/build/outputs/apk/debug/app-debug.apk
