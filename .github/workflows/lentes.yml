@@ -1,0 +1,315 @@
+name: Teste das lentes (APK)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Criar o projeto Android
+        run: |
+          mkdir -p lentes/app/src/main/java/pt/filipe/lentes
+          cd lentes
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "lentes"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3g
+          android.useAndroidX=false
+          kotlin.code.style=official
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "pt.filipe.lentes"
+              compileSdk = 35
+              defaultConfig {
+                  applicationId = "pt.filipe.lentes"
+                  minSdk = 28
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.CAMERA" />
+              <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+              <application android:label="Lentes" android:theme="@android:style/Theme.DeviceDefault">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/pt/filipe/lentes/MainActivity.kt <<'EOF'
+          package pt.filipe.lentes
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.ClipData
+          import android.content.ClipboardManager
+          import android.content.pm.PackageManager
+          import android.graphics.ImageFormat
+          import android.graphics.Typeface
+          import android.hardware.camera2.CameraCaptureSession
+          import android.hardware.camera2.CameraCharacteristics
+          import android.hardware.camera2.CameraDevice
+          import android.hardware.camera2.CameraManager
+          import android.hardware.camera2.params.OutputConfiguration
+          import android.hardware.camera2.params.SessionConfiguration
+          import android.media.ImageReader
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.HandlerThread
+          import android.os.Looper
+          import android.util.Size
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+          import java.util.concurrent.CountDownLatch
+          import java.util.concurrent.Executor
+          import java.util.concurrent.TimeUnit
+          import kotlin.math.sqrt
+
+          class MainActivity : Activity() {
+              private lateinit var out: TextView
+              private val sb = StringBuilder()
+              private val ui = Handler(Looper.getMainLooper())
+              private val camThread = HandlerThread("cam").apply { start() }
+              private val cam by lazy { Handler(camThread.looper) }
+              private var started = false
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(32, 120, 32, 32)
+                  }
+                  val btn = Button(this).apply {
+                      text = "Copiar relatório"
+                      setOnClickListener {
+                          val cb = getSystemService(ClipboardManager::class.java)
+                          cb.setPrimaryClip(ClipData.newPlainText("lentes", synchronized(sb) { sb.toString() }))
+                          Toast.makeText(this@MainActivity, "Copiado", Toast.LENGTH_SHORT).show()
+                      }
+                  }
+                  out = TextView(this).apply {
+                      typeface = Typeface.MONOSPACE
+                      textSize = 11f
+                      setTextIsSelectable(true)
+                  }
+                  val scroll = ScrollView(this).apply { addView(out) }
+                  root.addView(btn)
+                  root.addView(scroll, LinearLayout.LayoutParams(-1, -1))
+                  setContentView(root)
+                  if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) start()
+                  else requestPermissions(arrayOf(Manifest.permission.CAMERA), 1)
+              }
+
+              override fun onRequestPermissionsResult(rc: Int, p: Array<out String>, r: IntArray) {
+                  super.onRequestPermissionsResult(rc, p, r)
+                  if (r.firstOrNull() == PackageManager.PERMISSION_GRANTED) start() else log("Sem permissão de câmara.")
+              }
+
+              override fun onDestroy() {
+                  super.onDestroy()
+                  camThread.quitSafely()
+              }
+
+              private fun log(s: String = "") {
+                  val t = synchronized(sb) { sb.append(s).append('\n'); sb.toString() }
+                  ui.post { out.text = t }
+              }
+
+              private fun mp(w: Int, h: Int) = "%.1f".format(w.toLong() * h / 1e6)
+
+              private fun maxJpeg(ch: CameraCharacteristics): Size? =
+                  ch.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                      ?.getOutputSizes(ImageFormat.JPEG)
+                      ?.maxByOrNull { it.width.toLong() * it.height }
+
+              private fun start() {
+                  if (started) return
+                  started = true
+                  Thread {
+                      try { runAll() } catch (e: Throwable) { log("ERRO: $e") }
+                      log()
+                      log("=== FIM — carrega em Copiar relatório e cola no chat ===")
+                  }.start()
+              }
+
+              private fun probe(cm: CameraManager, id: String) =
+                  try { cm.getCameraCharacteristics(id); true } catch (e: Exception) { false }
+
+              private fun runAll() {
+                  val cm = getSystemService(CameraManager::class.java)
+                  log("${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+                  val listed = cm.cameraIdList.toList()
+                  val all = LinkedHashSet<String>(listed)
+                  for (id in listed) all.addAll(cm.getCameraCharacteristics(id).physicalCameraIds)
+                  val known = all.toSet()
+                  val hidden = ((0..15) + (20..99)).map { it.toString() }.filter { it !in known && probe(cm, it) }
+                  all.addAll(hidden)
+                  log("Listadas: $listed")
+                  log("Físicas: ${(known - listed.toSet()).ifEmpty { "nenhuma" }}")
+                  log("Escondidas: ${hidden.ifEmpty { "nenhuma" }}")
+                  for (id in all) describe(cm, id)
+
+                  log()
+                  log("--- TESTE DE CAPTURA ---")
+                  for (id in listed + hidden) capture(cm, id, null)
+                  for (id in listed) {
+                      val ch = cm.getCameraCharacteristics(id)
+                      val caps = ch.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
+                      if (CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA in caps)
+                          for (p in ch.physicalCameraIds) capture(cm, id, p)
+                  }
+              }
+
+              private fun describe(cm: CameraManager, id: String) {
+                  val ch = cm.getCameraCharacteristics(id)
+                  val facing = when (ch.get(CameraCharacteristics.LENS_FACING)) {
+                      CameraCharacteristics.LENS_FACING_FRONT -> "frontal"
+                      CameraCharacteristics.LENS_FACING_BACK -> "traseira"
+                      else -> "externa"
+                  }
+                  val fl = ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: 0f
+                  val sz = ch.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+                  val eq = if (sz != null && fl > 0f) fl * 43.27f / sqrt(sz.width * sz.width + sz.height * sz.height) else 0f
+                  val px = ch.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
+                  val caps = ch.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
+                  val logical = CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA in caps
+                  val tipo = when {
+                      logical -> "LÓGICA (junta várias lentes)"
+                      eq <= 0f -> "?"
+                      eq < 20f -> "ultra grande-angular"
+                      eq < 40f -> "principal"
+                      else -> "TELE ≈ ${"%.1f".format(eq / 24f)}x"
+                  }
+                  log()
+                  log("[$id] $facing · $tipo")
+                  if (fl > 0f) log("  focal ${"%.2f".format(fl)} mm ≈ ${eq.toInt()} mm equiv.")
+                  if (px != null) log("  sensor ${mp(px.width, px.height)} MP")
+                  val j = maxJpeg(ch)
+                  log("  JPEG máx. " + (if (j != null) "${j.width}x${j.height} (${mp(j.width, j.height)} MP)" else "—"))
+                  if (Build.VERSION.SDK_INT >= 31) {
+                      val hi = ch.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION)
+                          ?.getOutputSizes(ImageFormat.JPEG)?.maxByOrNull { it.width.toLong() * it.height }
+                      if (hi != null) log("  modo resolução máx. ${hi.width}x${hi.height} (${mp(hi.width, hi.height)} MP)")
+                  }
+                  if (Build.VERSION.SDK_INT >= 30) {
+                      ch.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)?.let { log("  zoom ${it.lower}x – ${it.upper}x") }
+                  }
+                  if (logical) log("  lentes físicas: ${ch.physicalCameraIds}")
+              }
+
+              private fun capture(cm: CameraManager, id: String, phys: String?) {
+                  val label = if (phys == null) "[$id]" else "[$id → física $phys]"
+                  val size = maxJpeg(cm.getCameraCharacteristics(phys ?: id))
+                  if (size == null) { log("$label ✗ sem saída JPEG"); return }
+                  val reader = ImageReader.newInstance(size.width, size.height, ImageFormat.JPEG, 2)
+                  var dev: CameraDevice? = null
+                  var ses: CameraCaptureSession? = null
+                  try {
+                      var why = "timeout"
+                      val opened = CountDownLatch(1)
+                      try {
+                          cm.openCamera(id, object : CameraDevice.StateCallback() {
+                              override fun onOpened(d: CameraDevice) { dev = d; opened.countDown() }
+                              override fun onDisconnected(d: CameraDevice) { d.close(); why = "desligada"; opened.countDown() }
+                              override fun onError(d: CameraDevice, e: Int) { d.close(); why = "erro $e"; opened.countDown() }
+                          }, cam)
+                      } catch (e: Exception) { log("$label ✗ não abre: ${e.message}"); return }
+                      opened.await(5, TimeUnit.SECONDS)
+                      val d = dev ?: run { log("$label ✗ não abre ($why)"); return }
+
+                      val oc = OutputConfiguration(reader.surface)
+                      if (phys != null) oc.setPhysicalCameraId(phys)
+                      val configured = CountDownLatch(1)
+                      d.createCaptureSession(SessionConfiguration(
+                          SessionConfiguration.SESSION_REGULAR, listOf(oc), Executor { cam.post(it) },
+                          object : CameraCaptureSession.StateCallback() {
+                              override fun onConfigured(s: CameraCaptureSession) { ses = s; configured.countDown() }
+                              override fun onConfigureFailed(s: CameraCaptureSession) { configured.countDown() }
+                          }))
+                      configured.await(5, TimeUnit.SECONDS)
+                      val s = ses ?: run { log("$label ✗ abre, mas recusa a sessão ${size.width}x${size.height}"); return }
+
+                      var got: Size? = null
+                      val shot = CountDownLatch(1)
+                      reader.setOnImageAvailableListener({ r ->
+                          r.acquireLatestImage()?.let { got = Size(it.width, it.height); it.close() }
+                          shot.countDown()
+                      }, cam)
+                      val req = d.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply { addTarget(reader.surface) }
+                      s.capture(req, null, cam)
+                      shot.await(8, TimeUnit.SECONDS)
+                      val g = got
+                      log(if (g != null) "$label ✓ tirou foto ${g.width}x${g.height} (${mp(g.width, g.height)} MP)"
+                          else "$label ✗ sessão aceite, mas não chegou imagem")
+                  } catch (e: Exception) {
+                      log("$label ✗ ${e.javaClass.simpleName}: ${e.message}")
+                  } finally {
+                      try { ses?.close() } catch (_: Exception) {}
+                      try { dev?.close() } catch (_: Exception) {}
+                      reader.close()
+                      Thread.sleep(400)
+                  }
+              }
+          }
+          EOF
+
+      - name: Instalar SDK Android
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-35" "build-tools;34.0.0" > /dev/null
+
+      - name: Compilar
+        run: gradle -p lentes assembleDebug --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lentes-apk
+          path: lentes/app/build/outputs/apk/debug/app-debug.apk
