@@ -1,0 +1,84 @@
+name: Enquadra nativa (APK)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "android/**"
+      - ".github/workflows/nativa.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.3"
+
+      - uses: actions/checkout@v4
+
+      - name: Instalar SDK Android
+        id: sdk
+        run: |
+          SDKM=$(command -v sdkmanager || ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)
+          echo "sdkmanager: ${SDKM:-não encontrado}"
+          if [ -n "$SDKM" ]; then
+            yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+            "$SDKM" "platforms;android-36" "build-tools;35.0.0" | tail -3 || echo "AVISO: sdkmanager falhou"
+          fi
+          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+
+      - name: Assinatura fixa
+        id: assinar
+        env:
+          KS: ${{ secrets.DEBUG_KEYSTORE }}
+        run: |
+          if [ -z "$KS" ]; then echo "ERRO: falta o segredo DEBUG_KEYSTORE." | tee -a passos.log; exit 1; fi
+          echo "$KS" | tr -d ' \n\r' | base64 -d > android/app/enquadra.keystore
+          FP=$(keytool -list -v -keystore android/app/enquadra.keystore -storepass android -alias androiddebugkey 2>/dev/null | grep -m1 "SHA256:" | sed 's/.*SHA256: //')
+          if [ -z "$FP" ]; then echo "ERRO: o segredo DEBUG_KEYSTORE não é uma chave válida." | tee -a passos.log; exit 1; fi
+          echo "Assinatura: \`${FP:0:23}…\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Testes do motor (Kotlin = JavaScript)
+        id: testes
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          gradle -p android testDebugUnitTest --no-daemon -i 2>&1 | tee test.log | grep -E "salTot|tercos|simetrico|minimal|aurea|diagonal|centro|moldura|subjCenter|^m |locate|PASSED|FAILED|tests completed" || true
+          exit ${PIPESTATUS[0]}
+
+      - name: Compilar
+        id: compilar
+        run: |
+          set -o pipefail
+          gradle -p android assembleDebug --no-daemon 2>&1 | tee build.log
+
+      - name: Resumo
+        if: always()
+        run: |
+          {
+            echo "## Testes: ${{ steps.testes.outcome }} · Compilar: ${{ steps.compilar.outcome }}"
+            if [ -f test.log ]; then
+              echo '```'
+              grep -E "salTot|^tercos|^simetrico|^minimal|^aurea|^diagonal|^centro|^moldura|subjCenter|^m \[|^locate|FAILED|AssertionError|expected" test.log | head -40
+              echo '```'
+            fi
+            if [ "${{ steps.compilar.outcome }}" != "success" ] && [ -f build.log ]; then
+              echo "### Erro de compilação"
+              echo '```'
+              grep -E "^e: |error:|What went wrong|Could not|FAILED" -A3 build.log | head -100
+              echo '```'
+            fi
+            [ -f passos.log ] && cat passos.log
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.compilar.outcome == 'success'
+        with:
+          name: enquadra-nativa
+          path: android/app/build/outputs/apk/debug/app-debug.apk

@@ -1,0 +1,208 @@
+package pt.filipe.enquadra.nativa
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.BitmapRegionDecoder
+import android.graphics.Matrix
+import android.graphics.Rect
+import android.os.Handler
+import android.os.Looper
+import android.util.Size
+import androidx.camera.core.*
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.LifecycleOwner
+import java.util.concurrent.Executors
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
+
+/**
+ * The camera, in one native layer: preview on screen, a small analysis stream for tracking and for the AI,
+ * and full-resolution photos. ViewPort makes all three see exactly what the screen shows.
+ * "Source" coordinates = the analysis image, upright and cropped to what the preview shows.
+ */
+class Cam(private val ctx: Context) {
+    private val main = Handler(Looper.getMainLooper())
+    private val exec = Executors.newSingleThreadExecutor()
+    private val shotExec = Executors.newSingleThreadExecutor()
+    var camera: Camera? = null; private set
+    private var capture: ImageCapture? = null
+    private var analysis: ImageAnalysis? = null
+    val tracker = Tracker()
+
+    @Volatile var srcW = 0; @Volatile var srcH = 0      // upright, cropped analysis frame
+    @Volatile var seq = 0L                               // frames seen
+    @Volatile var lastError = ""
+    @Volatile var trackOn = false
+
+    private var wantSnap: Pair<Int, (Bitmap?) -> Unit>? = null
+    private var wantHiGray: Pair<Int, (Gray?) -> Unit>? = null
+    private val lock = Any()
+
+    val minZoom get() = camera?.cameraInfo?.zoomState?.value?.minZoomRatio ?: 1f
+    val maxZoom get() = camera?.cameraInfo?.zoomState?.value?.maxZoomRatio ?: 1f
+    val zoom get() = camera?.cameraInfo?.zoomState?.value?.zoomRatio ?: 1f
+
+    fun info(): String {
+        val c = capture?.resolutionInfo?.resolution; val a = analysis?.resolutionInfo?.resolution
+        return "foto ${c?.width ?: "?"}×${c?.height ?: "?"} · análise ${a?.width ?: "?"}×${a?.height ?: "?"} · zoom ${"%.2f".format(minZoom)}–${"%.1f".format(maxZoom)}" +
+            (if (lastError.isNotEmpty()) "\nerro: $lastError" else "")
+    }
+
+    fun start(owner: LifecycleOwner, pv: PreviewView, onReady: () -> Unit, onFail: (String) -> Unit) {
+        val f = ProcessCameraProvider.getInstance(ctx)
+        f.addListener({
+            try {
+                val provider = f.get()
+                val vp = pv.viewPort ?: throw IllegalStateException("sem viewport")
+                val preview = Preview.Builder()
+                    .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY).build())
+                    .build().also { it.setSurfaceProvider(pv.surfaceProvider) }
+                val an = ImageAnalysis.Builder()
+                    .setResolutionSelector(ResolutionSelector.Builder()
+                        .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                        .setResolutionStrategy(ResolutionStrategy(Size(1280, 960), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER)).build())
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                    .build()
+                an.setAnalyzer(exec) { img -> try { onFrame(img) } catch (e: Throwable) { lastError = "análise: ${e.message}" } finally { img.close() } }
+                val cap = ImageCapture.Builder()
+                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                    .setResolutionSelector(ResolutionSelector.Builder()
+                        .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                        .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY).build())
+                    .setJpegQuality(95)
+                    .build()
+                val group = UseCaseGroup.Builder().setViewPort(vp).addUseCase(preview).addUseCase(an).addUseCase(cap).build()
+                provider.unbindAll()
+                camera = try {
+                    provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, group)
+                } catch (e: Exception) {
+                    // some phones refuse the three streams together at full size: drop the photo stream size
+                    lastError = "bind: ${e.message}"
+                    provider.unbindAll()
+                    val cap2 = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY).setJpegQuality(95).build()
+                    val g2 = UseCaseGroup.Builder().setViewPort(vp).addUseCase(preview).addUseCase(an).addUseCase(cap2).build()
+                    capture = cap2
+                    provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, g2)
+                }
+                if (capture == null) capture = cap
+                analysis = an
+                onReady()
+            } catch (e: Throwable) { lastError = e.message ?: e.toString(); onFail(lastError) }
+        }, ContextCompat.getMainExecutor(ctx))
+    }
+
+    fun setZoom(z: Float, done: (() -> Unit)? = null) {
+        val c = camera ?: run { done?.invoke(); return }
+        val fut = c.cameraControl.setZoomRatio(z.coerceIn(minZoom, maxZoom))
+        fut.addListener({ done?.invoke() }, ContextCompat.getMainExecutor(ctx))
+    }
+
+    /** A sharp colour frame of what the screen shows, longest side `max`. */
+    fun snapshot(maxSide: Int, cb: (Bitmap?) -> Unit) { synchronized(lock) { wantSnap = Pair(maxSide, cb) } }
+    /** A grey frame `w` pixels wide, for finding the frame after a lens change. */
+    fun hiGray(w: Int, cb: (Gray?) -> Unit) { synchronized(lock) { wantHiGray = Pair(w, cb) } }
+
+    // ---- analysis thread ----
+    private var ybuf = ByteArray(0)
+
+    private fun onFrame(img: ImageProxy) {
+        val crop = img.cropRect; val rot = img.imageInfo.rotationDegrees
+        val upW = if (rot % 180 == 0) crop.width() else crop.height()
+        val upH = if (rot % 180 == 0) crop.height() else crop.width()
+        srcW = upW; srcH = upH
+        val plane = img.planes[0]; val bb = plane.buffer; bb.rewind()
+        if (ybuf.size < bb.remaining()) ybuf = ByteArray(bb.remaining())
+        bb.get(ybuf, 0, bb.remaining())
+        val rs = plane.rowStride; val ps = plane.pixelStride
+        val sn: Pair<Int, (Bitmap?) -> Unit>?; val hg: Pair<Int, (Gray?) -> Unit>?
+        synchronized(lock) { sn = wantSnap; wantSnap = null; hg = wantHiGray; wantHiGray = null }
+        if (trackOn || sn != null) {
+            val g = yGray(crop, rot, upW, upH, rs, ps, 128)
+            if (sn != null) tracker.reset()    // tracking starts from the frame the AI sees
+            tracker.step(g)
+        }
+        if (hg != null) { val g = yGray(crop, rot, upW, upH, rs, ps, hg.first); main.post { hg.second(g) } }
+        if (sn != null) {
+            var out: Bitmap? = null
+            try {
+                val full = img.toBitmap()
+                val k = min(1f, sn.first.toFloat() / max(upW, upH))
+                val m = Matrix().apply { postRotate(rot.toFloat()); postScale(k, k) }
+                out = Bitmap.createBitmap(full, crop.left, crop.top, crop.width(), crop.height(), m, true)
+            } catch (e: Throwable) { lastError = "snapshot: ${e.message}" }
+            val o = out; main.post { sn.second(o) }
+        }
+        seq++
+    }
+
+    /** Upright grey of the cropped Y plane, outW wide, each cell the mean of 3x3 taps. */
+    private fun yGray(crop: Rect, rot: Int, upW: Int, upH: Int, rs: Int, ps: Int, outW: Int): Gray {
+        val W = outW; val H = max(32, (outW.toDouble() * upH / upW).roundToInt())
+        val g = FloatArray(W * H); val su = upW.toDouble() / W; val sv = upH.toDouble() / H
+        val cw = crop.width(); val chh = crop.height(); val ox = crop.left; val oy = crop.top
+        val buf = ybuf
+        for (j in 0 until H) for (i in 0 until W) {
+            var acc = 0
+            for (b in 0 until 3) for (a in 0 until 3) {
+                val u = ((i + (a + .5) / 3) * su).toInt().coerceIn(0, upW - 1)
+                val v = ((j + (b + .5) / 3) * sv).toInt().coerceIn(0, upH - 1)
+                val x: Int; val y: Int
+                when (rot) { 90 -> { x = v; y = chh - 1 - u }; 180 -> { x = cw - 1 - u; y = chh - 1 - v }; 270 -> { x = cw - 1 - v; y = u }; else -> { x = u; y = v } }
+                acc += buf[(oy + y) * rs + (ox + x) * ps].toInt() and 255
+            }
+            g[j * W + i] = acc / 9f
+        }
+        return Gray(g, W, H)
+    }
+
+    // ---- photo ----
+    class Photo(val bmp: Bitmap, val fullW: Int, val fullH: Int, val ms: Long)
+
+    /** Takes a full-resolution photo and cuts out the frame (r in source coordinates, sw x sh). */
+    fun takePhoto(r: RectD, sw: Int, sh: Int, cb: (Photo?, String) -> Unit) {
+        val cap = capture ?: run { cb(null, "sem câmara"); return }
+        val t0 = System.currentTimeMillis()
+        cap.takePicture(shotExec, object : ImageCapture.OnImageCapturedCallback() {
+            override fun onCaptureSuccess(image: ImageProxy) {
+                var res: Photo? = null; var why = ""
+                try {
+                    val bb = image.planes[0].buffer; bb.rewind(); val bytes = ByteArray(bb.remaining()); bb.get(bytes)
+                    val crop = image.cropRect; val rot = image.imageInfo.rotationDegrees
+                    // the JPEG may be smaller/larger than ImageProxy says on some phones: scale the crop to the real size
+                    val bo = BitmapFactory.Options().apply { inJustDecodeBounds = true }; BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bo)
+                    val jw = bo.outWidth; val jh = bo.outHeight
+                    val kx = jw.toDouble() / image.width; val ky = jh.toDouble() / image.height
+                    val cw = crop.width() * kx; val chh = crop.height() * ky; val ox = crop.left * kx; val oy = crop.top * ky
+                    val upW = if (rot % 180 == 0) cw else chh; val upH = if (rot % 180 == 0) chh else cw
+                    // frame in upright crop pixels
+                    val u0 = r.x / sw * upW; val v0 = r.y / sh * upH; val u1 = (r.x + r.w) / sw * upW; val v1 = (r.y + r.h) / sh * upH
+                    fun map(u: Double, v: Double): Pair<Double, Double> = when (rot) {
+                        90 -> Pair(v, chh - u); 180 -> Pair(cw - u, chh - v); 270 -> Pair(cw - v, u); else -> Pair(u, v) }
+                    val a = map(u0, v0); val b = map(u1, v1)
+                    val rx0 = (ox + min(a.first, b.first)).roundToInt().coerceIn(0, jw - 1)
+                    val ry0 = (oy + min(a.second, b.second)).roundToInt().coerceIn(0, jh - 1)
+                    val rx1 = (ox + max(a.first, b.first)).roundToInt().coerceIn(rx0 + 1, jw)
+                    val ry1 = (oy + max(a.second, b.second)).roundToInt().coerceIn(ry0 + 1, jh)
+                    @Suppress("DEPRECATION")
+                    val dec = BitmapRegionDecoder.newInstance(bytes, 0, bytes.size, false)!!
+                    val part = dec.decodeRegion(Rect(rx0, ry0, rx1, ry1), BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 })
+                    dec.recycle()
+                    val out = if (rot != 0) Bitmap.createBitmap(part, 0, 0, part.width, part.height, Matrix().apply { postRotate(rot.toFloat()) }, true).also { if (it !== part) part.recycle() } else part
+                    res = Photo(out, if (rot % 180 == 0) jw else jh, if (rot % 180 == 0) jh else jw, System.currentTimeMillis() - t0)
+                } catch (e: Throwable) { why = e.message ?: e.toString() } finally { image.close() }
+                val rr = res; val w = why; main.post { cb(rr, w) }
+            }
+            override fun onError(exc: ImageCaptureException) { val m = exc.message ?: "erro"; main.post { cb(null, m) } }
+        })
+    }
+
+    fun shutdown() { exec.shutdown(); shotExec.shutdown() }
+}
