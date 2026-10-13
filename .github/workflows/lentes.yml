@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/setup-java@v4
         with:
@@ -291,8 +291,8 @@ jobs:
                   } catch (e: Exception) {
                       log("$label ✗ ${e.javaClass.simpleName}: ${e.message}")
                   } finally {
-                      try { ses?.close() } catch (_: Exception) {}
-                      try { dev?.close() } catch (_: Exception) {}
+                      try { ses?.close() } catch (e: Exception) {}
+                      try { dev?.close() } catch (e: Exception) {}
                       reader.close()
                       Thread.sleep(400)
                   }
@@ -300,11 +300,10 @@ jobs:
           }
           EOF
 
+      - uses: android-actions/setup-android@v3
+
       - name: Instalar SDK Android
-        run: |
-          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$SDKM" --licenses > /dev/null || true
-          "$SDKM" "platforms;android-35" "build-tools;34.0.0" > /dev/null
+        run: sdkmanager "platforms;android-35" "build-tools;34.0.0"
 
       - name: Compilar
         run: gradle -p lentes assembleDebug --no-daemon --stacktrace
