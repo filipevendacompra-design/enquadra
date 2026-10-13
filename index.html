@@ -968,8 +968,17 @@ function layout(){
   return {s, ox:(VW-w*s)/2, oy:(VH-h*s)/2, VW, VH};
 }
 function tracking(){ return S.mode==="live" && (S.phase==="scan"||S.phase==="guide"); }
+const TS={x:null,y:null,t:0};   // smoothed tracking offset (app camera)
+function smoothTrack(){
+  if(!tracking()){ TS.x=null; return; }
+  const k=S.src.w/(VT.prev?VT.prev.W:128), tx=VT.dx*k, ty=VT.dy*k, now=performance.now();
+  if(TS.x==null){ TS.x=tx; TS.y=ty; }
+  else { const a=1-Math.exp(-(now-TS.t)/70); TS.x+=(tx-TS.x)*a; TS.y+=(ty-TS.y)*a; }   // ~70 ms time constant
+  TS.t=now;
+}
 function trackOffset(){
   if(!tracking()) return {dx:0,dy:0};
+  if(NCAM && TS.x!=null) return {dx:TS.x, dy:TS.y};
   const k=S.src.w/(VT.prev?VT.prev.W:128);
   return {dx:VT.dx*k, dy:VT.dy*k};
 }
@@ -1038,6 +1047,44 @@ const photoWait={};
 window.__photo=(id,url)=>{ const p=photoWait[id]; if(!p) return; delete photoWait[id]; if(!url) return p(null);
   const im=new Image(); im.onload=()=>{ const c=document.createElement("canvas"); c.width=im.naturalWidth; c.height=im.naturalHeight; c.getContext("2d").drawImage(im,0,0); p(c); };
   im.onerror=()=>p(null); im.src=/^https?:/.test(url) ? url+"?t="+Date.now() : url; };
+/* Take the photo with the lens that fills the frame, then find where the frame landed in it
+   (lenses sit apart on the phone, so switching shifts the picture a little), and cut it out. */
+async function nativeTeleShot(r){
+  const L=layout(), vw=L.VW/L.s, vh=L.VH/L.s, z0=S.camZoom||1;
+  const zc=S.zoomCaps||{min:1,max:1}, zt=cl(z0*Math.min(vw/r.w, vh/r.h)*.8, zc.min, zc.max);
+  const zr = zt/z0>1.15 ? zt/z0 : 1;
+  const RW=96, RH=Math.max(16,Math.round(96*r.h/r.w)), tpl=grayOf(nvc,r.x,r.y,r.w,r.h,RW,RH);
+  if(zr>1){
+    try{ Native.previewVisible(false); }catch{}
+    await applyZoom(z0*zr);
+    const seq=nvSeq, t0=performance.now(); while(nvSeq<seq+6 && performance.now()-t0<1800) await sleep(40);
+  }
+  const c=await nativePhoto({x:0,y:0,w:1,h:1});
+  if(zr>1){ await applyZoom(z0); try{ Native.previewVisible(S.mode==="live"); }catch{} lastVis=null; }
+  if(!c) return null;
+  // where the frame should be, then search around it
+  const sx=c.width/S.src.w, sy=c.height/S.src.h, cx=S.src.w/2, cy=S.src.h/2;
+  const pw=r.w*zr*sx, ph=r.h*zr*sy;
+  let best={x:(cx+(r.x+r.w/2-cx)*zr)*sx-pw/2, y:(cy+(r.y+r.h/2-cy)*zr)*sy-ph/2, w:pw, h:ph};
+  const fits=b=>b.x>=-1&&b.y>=-1&&b.x+b.w<=c.width+1&&b.y+b.h<=c.height+1;
+  best.e = fits(best) ? mad(tpl,grayOf(c,best.x,best.y,best.w,best.h,RW,RH)) : 1e9;
+  const pred={...best};
+  if(zr>1) for(const st of [.05,.015]){
+    const b0={...best};
+    for(const ks of [.95,1,1.05]) for(let dy=-3;dy<=3;dy++) for(let dx=-3;dx<=3;dx++){
+      const w=b0.w*ks, h=b0.h*ks, b={x:b0.x+b0.w/2-w/2+dx*st*b0.w, y:b0.y+b0.h/2-h/2+dy*st*b0.h, w, h};
+      if(!fits(b)) continue;
+      const e=mad(tpl,grayOf(c,b.x,b.y,b.w,b.h,RW,RH)); if(e<best.e) best={...b,e};
+    }
+  }
+  const use = best.e<40 ? best : pred;
+  window.__tele={zr:+zr.toFixed(2), err:+best.e.toFixed(1), errPred:+pred.e.toFixed(1), shiftX:Math.round(use.x-pred.x), shiftY:Math.round(use.y-pred.y)};   // for diagnostics
+  const x=cl(use.x,0,c.width-2), y=cl(use.y,0,c.height-2), w=Math.min(use.w,c.width-x), h=Math.min(use.h,c.height-y);
+  const sc=Math.min(1,4096/Math.max(w,h)), o=document.createElement("canvas");
+  o.width=Math.round(w*sc); o.height=Math.round(h*sc);
+  o.getContext("2d").drawImage(c,x,y,w,h,0,0,o.width,o.height);
+  S.teleZoom=zr; return o;
+}
 function nativePhoto(r){   // full-resolution photo from the lens in use, cropped to the frame
   return new Promise(res=>{ const id="p"+Date.now(); photoWait[id]=res;
     setTimeout(()=>{ if(photoWait[id]){ delete photoWait[id]; res(null); } },20000);
@@ -1060,7 +1107,11 @@ function renderNano(){
   if(!/MB|falhou/.test($("#nanoTxt").textContent)) $("#nanoTxt").textContent="Gemini Nano: "+txt+". Corre no telemóvel, sem internet e sem quota.";
   $("#btnNano").hidden=st!=="downloadable";
 }
-let lastRect="", lastVis=null;
+let lastRect="", lastVis=null, lastTf="";
+function nativeTransform(z,tx,ty){   // the native preview zooms exactly like the browser video (digital, steady)
+  const k=z.toFixed(3)+","+tx.toFixed(1)+","+ty.toFixed(1); if(k===lastTf) return; lastTf=k;
+  try{ Native.setPreviewTransform(z,tx,ty); }catch{}
+}
 function syncPreview(){   // keep the native camera exactly under the stage
   if(!NATIVE) return;
   const r=stage.getBoundingClientRect(), key=[r.left,r.top,r.width,r.height].map(v=>Math.round(v)).join(",");
@@ -1234,7 +1285,6 @@ async function findShot(){
   finally{ S.busy=false; $("#scan").hidden=true; ui(); }
 }
 async function lock(){
-  if(NCAM && S.mode==="live" && S.zoomCaps) return nativeLock();
   // The crop stays exactly where the frame was. The preview zooms into that same crop,
   // so what you see is what gets saved. (A real lens switch shifted the centre on some phones.)
   const f=curFrame(), w=Math.min(f.w,S.src.w), h=Math.min(f.h,S.src.h);
@@ -1295,7 +1345,7 @@ async function refineShot(){
   }catch{}
 }
 async function resetView(){
-  S.cssZoom=false; video.style.transform=""; S.alignedSince=0; S.lockRem=0; S.refAt=0; S.refFrom=null; S.lockAt=0;
+  S.cssZoom=false; video.style.transform=""; if(NCAM) nativeTransform(1,0,0); S.alignedSince=0; S.lockRem=0; S.refAt=0; S.refFrom=null; S.lockAt=0;
   if(S.mode==="live" && S.zoomCaps && Math.abs(S.camZoom-S.homeZoom)>.01) await applyZoom(S.homeZoom);
 }
 async function clearShot(){
@@ -1410,8 +1460,8 @@ async function capture(){
   const w=Math.min(f.w,SW), h=Math.min(f.h,SH), x=cl(f.x,0,SW-w), y=cl(f.y,0,SH-h);
   let c=null;
   if(S.mode==="live" && NCAM){
-    S.capturing=true; shutter.disabled=true; setMsg("A tirar a foto…","ok");
-    try{ c=await nativePhoto({x:x/SW,y:y/SH,w:w/SW,h:h/SH}); }catch{ c=null; }
+    S.capturing=true; shutter.disabled=true; setMsg("A tirar a foto com a lente certa…","ok");
+    try{ c=await nativeTeleShot({x,y,w,h}); }catch{ c=null; }
     S.capturing=false; shutter.disabled=false; S.fullres=!!c;
     if(!c) setMsg("A câmara não devolveu a foto; usei a imagem do visor.","err");
   } else if(S.mode==="live" && S.set.fullres){
@@ -1689,7 +1739,7 @@ function rr(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,
 const AMBER="#f5c531", GREEN="#7bd88f";
 function draw(){
   requestAnimationFrame(draw);
-  syncPreview();
+  syncPreview(); smoothTrack();
   if(S.mode==="live" && liveW()) S.src={w:liveW(),h:liveH()};
   if(tracking() && liveW()){ const now=performance.now();
     if(NCAM ? VT.seq!==nvSeq : (!VT.t||now-VT.t>30)){ VT.t=now; VT.seq=nvSeq; try{ vtStep(liveEl(),liveW(),liveH()); }catch{} } }
@@ -1716,6 +1766,7 @@ function draw(){
       const tx=(cx-(fx+fw/2)*zt)*ease + 0, ty=(cy-(fy+fh/2)*zt)*ease;
       const t=`translate(${tx.toFixed(1)}px,${ty.toFixed(1)}px) scale(${z.toFixed(3)})`;
       if(video.style.transform!==t) video.style.transform=t;
+      if(NCAM) nativeTransform(z,tx,ty);
       fx=fx*z+tx; fy=fy*z+ty; fw*=z; fh*=z;
     }
     const col = aligned ? GREEN : AMBER;
@@ -1834,7 +1885,12 @@ $("#btnShare").onclick=async()=>{
   try{ if(navigator.canShare({files:[file]})) await navigator.share({files:[file]}); }catch{}
 };
 // settings
-function testerLink(){ return S.set.gkey ? location.origin+location.pathname+"#k="+encodeURIComponent(S.set.gkey) : ""; }
+const PUBLIC_URL="https://filipevendacompra-design.github.io/enquadra/";   // the web version testers open
+function testerLink(){
+  if(!S.set.gkey) return "";
+  const base = location.protocol==="https:" && !/androidplatform\.net$/.test(location.hostname) ? location.origin+location.pathname : PUBLIC_URL;
+  return base+"#k="+encodeURIComponent(S.set.gkey);
+}
 $("#btnCopyLink").onclick=async()=>{
   const v=testerLink(), o=$("#copyOut"), inp=$("#shareLink"); inp.value=v;
   if(!v){ o.className="test-out err"; o.textContent="Primeiro cola a tua chave."; return; }
