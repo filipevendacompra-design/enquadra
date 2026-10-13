@@ -63,8 +63,16 @@ jobs:
                   applicationId = "pt.filipe.enquadra"
                   minSdk = 29
                   targetSdk = 34
-                  versionCode = 4
-                  versionName = "0.4"
+                  versionCode = 6
+                  versionName = "0.6"
+              }
+              signingConfigs {
+                  getByName("debug") {
+                      storeFile = file("enquadra.keystore")
+                      storePassword = "android"
+                      keyAlias = "androiddebugkey"
+                      keyPassword = "android"
+                  }
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -108,6 +116,11 @@ jobs:
 
           import android.Manifest
           import android.annotation.SuppressLint
+          import android.app.AlertDialog
+          import android.content.ClipData
+          import android.content.ClipboardManager
+          import android.webkit.RenderProcessGoneDetail
+          import android.widget.Toast
           import android.content.ContentValues
           import android.content.pm.PackageManager
           import android.graphics.Bitmap
@@ -190,15 +203,49 @@ jobs:
                   fileCallback = null
               }
               private val askCam = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-                  if (ok) bindCamera()
+                  if (ok) bindCamera() else camError("sem permissão para a câmara: ativa-a em Definições › Aplicações › Enquadra › Permissões")
               }
 
               private fun shotsDir(): File = File(cacheDir, "shots").apply { mkdirs() }
               private fun js(code: String) { ui.post { web.evaluateJavascript(code, null) } }
 
+              private fun crashFile(): File = File(filesDir, "crash.txt")
+
+              /** Any crash is written down and shown on the next launch, so it can be copied and sent. */
+              private fun installCrashLog() {
+                  val prev = Thread.getDefaultUncaughtExceptionHandler()
+                  Thread.setDefaultUncaughtExceptionHandler { t, e ->
+                      try {
+                          crashFile().writeText("Enquadra crash (" + t.name + ")\n" + android.util.Log.getStackTraceString(e).take(6000))
+                      } catch (x: Throwable) {
+                          // nothing more to do
+                      }
+                      prev?.uncaughtException(t, e)
+                  }
+              }
+
+              private fun showLastCrash() {
+                  val f = crashFile()
+                  if (!f.exists()) return
+                  val txt = try { f.readText() } catch (e: Throwable) { "" }
+                  f.delete()
+                  if (txt.isBlank()) return
+                  AlertDialog.Builder(this)
+                      .setTitle("A Enquadra fechou com um erro")
+                      .setMessage(txt.take(1500))
+                      .setPositiveButton("Copiar erro") { _, _ ->
+                          val cb = getSystemService(ClipboardManager::class.java)
+                          cb?.setPrimaryClip(ClipData.newPlainText("erro", txt))
+                          Toast.makeText(this, "Copiado: cola-o no chat", Toast.LENGTH_LONG).show()
+                      }
+                      .setNegativeButton("Fechar", null)
+                      .show()
+              }
+
               @SuppressLint("SetJavaScriptEnabled")
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
+                  installCrashLog()
                   shotsDir().listFiles()?.forEach { it.delete() }
                   val density = resources.displayMetrics.density
 
@@ -206,7 +253,7 @@ jobs:
                   preview = PreviewView(this).apply {
                       implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                       scaleType = PreviewView.ScaleType.FILL_CENTER
-                      visibility = View.INVISIBLE
+                      // stays VISIBLE: an invisible TextureView is never drawn, so the camera would never get its surface
                       clipToOutline = true
                       outlineProvider = object : ViewOutlineProvider() {
                           override fun getOutline(view: View, outline: Outline) {
@@ -229,6 +276,16 @@ jobs:
                   web.webViewClient = object : WebViewClientCompat() {
                       override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
                           loader.shouldInterceptRequest(request.url)
+
+                      override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                          try {
+                              crashFile().writeText("O motor da página parou (" + (if (detail.didCrash()) "erro" else "falta de memória") + "). A app foi reaberta.")
+                          } catch (e: Throwable) {
+                              // ignore
+                          }
+                          recreate()
+                          return true
+                      }
                   }
                   web.webChromeClient = object : WebChromeClient() {
                       override fun onShowFileChooser(
@@ -251,8 +308,11 @@ jobs:
                   onBackPressedDispatcher.addCallback(this) {
                       if (web.canGoBack()) web.goBack() else finish()
                   }
-                  nanoExec.execute { nState = Nano.status() }
+                  nanoExec.execute {
+                      nState = try { Nano.status() } catch (e: Throwable) { FeatureStatus.UNAVAILABLE }
+                  }
                   web.loadUrl("https://appassets.androidplatform.net/assets/index.html")
+                  showLastCrash()
               }
 
               override fun onDestroy() {
@@ -263,39 +323,64 @@ jobs:
               }
 
               // ---------- Camera ----------
+              private fun camError(m: String) {
+                  js("window.__camError&&__camError(" + JSONObject.quote(m) + ")")
+              }
+
+              /** Tries the best setup first; some phones refuse the combination, so simpler ones follow. */
               private fun bindCamera() {
                   if (bound) return
                   val future = ProcessCameraProvider.getInstance(this)
                   future.addListener({
-                      try {
-                          val provider = future.get()
-                          val r43 = ResolutionSelector.Builder()
-                              .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
-                              .build()
-                          val pv = Preview.Builder().setResolutionSelector(r43).build()
-                          pv.setSurfaceProvider(preview.surfaceProvider)
-                          val ic = ImageCapture.Builder()
-                              .setResolutionSelector(r43)
-                              .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                              .build()
-                          val rAn = ResolutionSelector.Builder()
-                              .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
-                              .setResolutionStrategy(ResolutionStrategy(Size(1280, 960), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER))
-                              .build()
-                          val an = ImageAnalysis.Builder()
-                              .setResolutionSelector(rAn)
-                              .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                              .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                              .build()
-                          an.setAnalyzer(frameExec) { img -> onFrame(img) }
-                          provider.unbindAll()
-                          camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, pv, ic, an)
-                          imageCapture = ic
-                          bound = true
-                      } catch (e: Exception) {
-                          js("console.error(" + JSONObject.quote("camera: " + e.message) + ")")
+                      val provider = try { future.get() } catch (e: Exception) { camError("CameraX: " + e.message); return@addListener }
+                      val errors = ArrayList<String>()
+                      for (level in 0..2) {
+                          try {
+                              val r43 = ResolutionSelector.Builder()
+                                  .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                                  .build()
+                              val pv = Preview.Builder().setResolutionSelector(r43).build()
+                              pv.setSurfaceProvider(preview.surfaceProvider)
+                              val anB = ImageAnalysis.Builder()
+                                  .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                  .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                              if (level == 0) {
+                                  anB.setResolutionSelector(
+                                      ResolutionSelector.Builder()
+                                          .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                                          .setResolutionStrategy(ResolutionStrategy(Size(1280, 960), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER))
+                                          .build()
+                                  )
+                              } else {
+                                  anB.setResolutionSelector(r43)
+                              }
+                              val an = anB.build()
+                              an.setAnalyzer(frameExec) { img -> onFrame(img) }
+                              provider.unbindAll()
+                              if (level < 2) {
+                                  val icB = ImageCapture.Builder().setResolutionSelector(r43)
+                                  if (level == 0) icB.setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                                  val ic = icB.build()
+                                  camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, pv, ic, an)
+                                  imageCapture = ic
+                              } else {
+                                  camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, pv, an)
+                                  imageCapture = null
+                              }
+                              bound = true
+                              return@addListener
+                          } catch (e: Exception) {
+                              errors.add("nível $level: " + (e.message ?: e.javaClass.simpleName))
+                          }
                       }
+                      camError(errors.joinToString("; "))
                   }, ContextCompat.getMainExecutor(this))
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  // back from the system settings with the permission now granted
+                  if (pageReady && !bound && checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) bindCamera()
               }
 
               private fun upright(b: Bitmap, deg: Int): Bitmap {
@@ -321,16 +406,16 @@ jobs:
               private fun onFrame(img: ImageProxy) {
                   try {
                       val now = SystemClock.uptimeMillis()
-                      if (now - lastPush < 80) return
+                      if (now - lastPush < 120) return
                       lastPush = now
                       val up = upright(img.toBitmap(), img.imageInfo.rotationDegrees)
                       synchronized(frameLock) { latest = up }
                       if (!pageReady) return
-                      val b64 = jpeg(scaleTo(up, 480), 70)
+                      val b64 = jpeg(scaleTo(up, 360), 65)
                       val z = camera?.cameraInfo?.zoomState?.value?.zoomRatio ?: 1f
                       js("window.__nf&&__nf('data:image/jpeg;base64,$b64',$z)")
-                  } catch (e: Exception) {
-                      // skip this frame
+                  } catch (e: Throwable) {
+                      // skip this frame (also when memory is short)
                   } finally {
                       img.close()
                   }
@@ -338,7 +423,7 @@ jobs:
 
               private fun capture(id: String, x: Double, y: Double, w: Double, h: Double) {
                   val ic = imageCapture
-                  if (ic == null) { js("window.__photo&&__photo('$id','')"); return }
+                  if (ic == null) { js("window.__photo&&__photo('$id','')"); return }   // simplest setup: the page uses the viewfinder image
                   ic.takePicture(photoExec, object : ImageCapture.OnImageCapturedCallback() {
                       override fun onCaptureSuccess(image: ImageProxy) {
                           try {
@@ -409,7 +494,7 @@ jobs:
 
                   @JavascriptInterface
                   fun previewVisible(v: Boolean) {
-                      ui.post { preview.visibility = if (v) View.VISIBLE else View.INVISIBLE }
+                      ui.post { preview.alpha = if (v) 1f else 0f }
                   }
 
                   @JavascriptInterface
@@ -453,8 +538,12 @@ jobs:
                   fun nanoDownload() {
                       nState = FeatureStatus.DOWNLOADING
                       nanoExec.execute {
-                          Nano.download { m -> js("window.__nanoProgress&&__nanoProgress(" + JSONObject.quote(m) + ")") }
-                          nState = Nano.status()
+                          try {
+                              Nano.download { m -> js("window.__nanoProgress&&__nanoProgress(" + JSONObject.quote(m) + ")") }
+                              nState = Nano.status()
+                          } catch (e: Throwable) {
+                              nState = FeatureStatus.UNAVAILABLE
+                          }
                           js("window.__nanoProgress&&__nanoProgress(" + JSONObject.quote(Nano.statusText(nState)) + ")")
                       }
                   }
@@ -468,7 +557,7 @@ jobs:
                               val bytes = Base64.decode(b64, Base64.DEFAULT)
                               val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                               text = Nano.ask(scaleTo(bmp, 768), prompt, 0.6f, 20000)
-                          } catch (e: Exception) {
+                          } catch (e: Throwable) {
                               err = e.javaClass.simpleName + ": " + (e.message ?: "")
                           }
                           js("window.__nano&&__nano(" + JSONObject.quote(id) + "," + JSONObject.quote(text) + "," + JSONObject.quote(err) + ")")
@@ -559,16 +648,19 @@ jobs:
           echo "sdk.dir=$ANDROID_HOME" > enquadra/local.properties
 
       - name: Assinatura fixa
+        id: assinar
         env:
           KS: ${{ secrets.DEBUG_KEYSTORE }}
         run: |
-          if [ -n "$KS" ]; then
-            mkdir -p ~/.android
-            echo "$KS" | tr -d ' \n\r' | base64 -d > ~/.android/debug.keystore
-            echo "Assinatura fixa: atualizações instalam por cima." >> passos.log
-          else
-            echo "AVISO: sem o segredo DEBUG_KEYSTORE; a assinatura muda em cada compilação." | tee -a passos.log
+          if [ -z "$KS" ]; then
+            echo "ERRO: falta o segredo DEBUG_KEYSTORE (Settings > Secrets and variables > Actions). Sem ele cada APK tem outra assinatura e não atualiza por cima." | tee -a passos.log
+            exit 1
           fi
+          echo "$KS" | tr -d ' \n\r' | base64 -d > enquadra/app/enquadra.keystore
+          FP=$(keytool -list -v -keystore enquadra/app/enquadra.keystore -storepass android -alias androiddebugkey 2>/dev/null | grep -m1 "SHA256:" | sed 's/.*SHA256: //')
+          if [ -z "$FP" ]; then echo "ERRO: o segredo DEBUG_KEYSTORE não é uma chave válida." | tee -a passos.log; exit 1; fi
+          echo "Assinatura fixa SHA-256: $FP" | tee -a passos.log
+          echo "Assinatura: \`${FP:0:23}…\` (tem de ser sempre a mesma)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Compilar
         id: compilar
@@ -581,7 +673,7 @@ jobs:
         run: |
           {
             echo "## Erro"
-            echo "criar=${{ steps.criar.outcome }} · sdk=${{ steps.sdk.outcome }} · compilar=${{ steps.compilar.outcome }}"
+            echo "criar=${{ steps.criar.outcome }} · sdk=${{ steps.sdk.outcome }} · assinar=${{ steps.assinar.outcome }} · compilar=${{ steps.compilar.outcome }}"
             echo '```'
             [ -f passos.log ] && tail -30 passos.log
             if [ -f build.log ]; then
@@ -595,5 +687,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: enquadra-apk-0.4
+          name: enquadra-apk-0.6
           path: enquadra/app/build/outputs/apk/debug/app-debug.apk
