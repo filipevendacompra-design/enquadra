@@ -63,8 +63,8 @@ jobs:
                   applicationId = "pt.filipe.enquadra"
                   minSdk = 29
                   targetSdk = 34
-                  versionCode = 6
-                  versionName = "0.6"
+                  versionCode = 7
+                  versionName = "0.7"
               }
               signingConfigs {
                   getByName("debug") {
@@ -156,6 +156,8 @@ jobs:
           import androidx.camera.core.ImageCaptureException
           import androidx.camera.core.ImageProxy
           import androidx.camera.core.Preview
+          import androidx.camera.core.UseCaseGroup
+          import android.graphics.Rect
           import androidx.camera.core.resolutionselector.AspectRatioStrategy
           import androidx.camera.core.resolutionselector.ResolutionSelector
           import androidx.camera.core.resolutionselector.ResolutionStrategy
@@ -186,6 +188,8 @@ jobs:
               private var camera: Camera? = null
               private var imageCapture: ImageCapture? = null
               private var bound = false
+              private var boundAspect = 0f
+              @Volatile private var wantCamera = false
               private val frameExec = Executors.newSingleThreadExecutor()
               private val photoExec = Executors.newSingleThreadExecutor()
               private val nanoExec = Executors.newSingleThreadExecutor()
@@ -198,12 +202,17 @@ jobs:
               @Volatile private var nState = Nano.UNKNOWN
 
               private var fileCallback: ValueCallback<Array<Uri>>? = null
+              private var pendingWebPerm: PermissionRequest? = null
               private val pickImage = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
                   fileCallback?.onReceiveValue(if (uri != null) arrayOf(uri) else null)
                   fileCallback = null
               }
               private val askCam = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-                  if (ok) bindCamera() else camError("sem permissão para a câmara: ativa-a em Definições › Aplicações › Enquadra › Permissões")
+                  val web = pendingWebPerm
+                  pendingWebPerm = null
+                  if (web != null) {   // the page's own camera (fallback) asked for it
+                      if (ok) web.grant(arrayOf(PermissionRequest.RESOURCE_VIDEO_CAPTURE)) else web.deny()
+                  } else if (ok) preview.post { bindCamera() } else camError("sem permissão para a câmara: ativa-a em Definições › Aplicações › Enquadra › Permissões")
               }
 
               private fun shotsDir(): File = File(cacheDir, "shots").apply { mkdirs() }
@@ -298,7 +307,13 @@ jobs:
                       }
 
                       override fun onPermissionRequest(request: PermissionRequest) {
-                          request.deny()   // the camera is native; the page never opens it itself
+                          // only used when the native camera failed and the page falls back to the browser camera
+                          ui.post {
+                              if (!request.resources.contains(PermissionRequest.RESOURCE_VIDEO_CAPTURE)) request.deny()
+                              else if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
+                                  request.grant(arrayOf(PermissionRequest.RESOURCE_VIDEO_CAPTURE))
+                              else { pendingWebPerm = request; askCam.launch(Manifest.permission.CAMERA) }
+                          }
                       }
                   }
                   web.addJavascriptInterface(Bridge(), "Native")
@@ -327,9 +342,18 @@ jobs:
                   js("window.__camError&&__camError(" + JSONObject.quote(m) + ")")
               }
 
-              /** Tries the best setup first; some phones refuse the combination, so simpler ones follow. */
+              private fun hasCam() = checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+
+              /**
+               * Preview, analysis frames and photos share the viewport of the stage, so the page's frame sits exactly
+               * on what you see. Tries the best setup first; some phones refuse the combination, so simpler ones follow.
+               */
               private fun bindCamera() {
-                  if (bound) return
+                  if (!wantCamera || !hasCam()) return
+                  if (preview.width < 16 || preview.height < 16) return          // waits for the page to place the stage
+                  val aspect = preview.width.toFloat() / preview.height
+                  if (bound && kotlin.math.abs(aspect - boundAspect) < 0.01f) return
+                  val vp = preview.viewPort ?: return
                   val future = ProcessCameraProvider.getInstance(this)
                   future.addListener({
                       val provider = try { future.get() } catch (e: Exception) { camError("CameraX: " + e.message); return@addListener }
@@ -356,18 +380,19 @@ jobs:
                               }
                               val an = anB.build()
                               an.setAnalyzer(frameExec) { img -> onFrame(img) }
-                              provider.unbindAll()
+                              val group = UseCaseGroup.Builder().setViewPort(vp).addUseCase(pv).addUseCase(an)
+                              var ic: ImageCapture? = null
                               if (level < 2) {
                                   val icB = ImageCapture.Builder().setResolutionSelector(r43)
                                   if (level == 0) icB.setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                                  val ic = icB.build()
-                                  camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, pv, ic, an)
-                                  imageCapture = ic
-                              } else {
-                                  camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, pv, an)
-                                  imageCapture = null
+                                  ic = icB.build()
+                                  group.addUseCase(ic)
                               }
+                              provider.unbindAll()
+                              camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, group.build())
+                              imageCapture = ic
                               bound = true
+                              boundAspect = aspect
                               return@addListener
                           } catch (e: Exception) {
                               errors.add("nível $level: " + (e.message ?: e.javaClass.simpleName))
@@ -380,7 +405,17 @@ jobs:
               override fun onResume() {
                   super.onResume()
                   // back from the system settings with the permission now granted
-                  if (pageReady && !bound && checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) bindCamera()
+                  if (wantCamera && !bound && hasCam()) bindCamera()
+              }
+
+              /** The viewport's crop, given in buffer coordinates (before rotation). */
+              private fun cropTo(b: Bitmap, r: Rect): Bitmap {
+                  val x = r.left.coerceIn(0, b.width - 1)
+                  val y = r.top.coerceIn(0, b.height - 1)
+                  val w = r.width().coerceIn(1, b.width - x)
+                  val h = r.height().coerceIn(1, b.height - y)
+                  if (x == 0 && y == 0 && w == b.width && h == b.height) return b
+                  return Bitmap.createBitmap(b, x, y, w, h)
               }
 
               private fun upright(b: Bitmap, deg: Int): Bitmap {
@@ -408,7 +443,7 @@ jobs:
                       val now = SystemClock.uptimeMillis()
                       if (now - lastPush < 120) return
                       lastPush = now
-                      val up = upright(img.toBitmap(), img.imageInfo.rotationDegrees)
+                      val up = upright(cropTo(img.toBitmap(), img.cropRect), img.imageInfo.rotationDegrees)
                       synchronized(frameLock) { latest = up }
                       if (!pageReady) return
                       val b64 = jpeg(scaleTo(up, 360), 65)
@@ -428,7 +463,7 @@ jobs:
                       override fun onCaptureSuccess(image: ImageProxy) {
                           try {
                               val deg = image.imageInfo.rotationDegrees
-                              val raw = image.toBitmap()
+                              val raw = cropTo(image.toBitmap(), image.cropRect)
                               image.close()
                               val bmp = upright(raw, deg)
                               val cx = (x * bmp.width).roundToInt().coerceIn(0, bmp.width - 1)
@@ -466,9 +501,24 @@ jobs:
                   @JavascriptInterface
                   fun startCamera() {
                       pageReady = true
+                      wantCamera = true
                       ui.post {
-                          if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) bindCamera()
-                          else askCam.launch(Manifest.permission.CAMERA)
+                          if (hasCam()) preview.post { bindCamera() } else askCam.launch(Manifest.permission.CAMERA)
+                      }
+                  }
+
+                  @JavascriptInterface
+                  fun hasCameraPermission(): Boolean =
+                      checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+
+                  @JavascriptInterface
+                  fun stopCamera() {
+                      ui.post {
+                          try { ProcessCameraProvider.getInstance(this@MainActivity).get().unbindAll() } catch (e: Throwable) { }
+                          bound = false
+                          wantCamera = false
+                          camera = null
+                          imageCapture = null
                       }
                   }
 
@@ -489,6 +539,7 @@ jobs:
                           lp.topMargin = (y * d).roundToInt()
                           preview.layoutParams = lp
                           preview.invalidateOutline()
+                          preview.post { bindCamera() }   // (re)bind once laid out: the viewport follows the stage
                       }
                   }
 
@@ -687,5 +738,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: enquadra-apk-0.6
+          name: enquadra-apk-0.7
           path: enquadra/app/build/outputs/apk/debug/app-debug.apk
