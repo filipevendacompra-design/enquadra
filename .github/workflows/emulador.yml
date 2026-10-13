@@ -2,6 +2,11 @@ name: Emulador (teste da app nativa)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [nativa]
+    paths:
+      - "android/ci/**"
+      - ".github/workflows/emulador.yml"
 
 permissions:
   contents: write
