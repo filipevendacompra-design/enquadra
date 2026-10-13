@@ -27,6 +27,13 @@ jobs:
           for f in index.html u2netp.onnx nima.onnx; do
             if [ -f "$f" ]; then cp "$f" enquadra/app/src/main/assets/; echo "incluído: $f"; else echo "FALTA no repositório: $f"; exit 1; fi
           done
+          echo "== Detetor de objetos (vai dentro da app) =="
+          A=enquadra/app/src/main/assets; mkdir -p $A/mediapipe/wasm
+          (cd "$RUNNER_TEMP" && npm pack @mediapipe/tasks-vision@0.10.14 --silent >/dev/null && tar xzf mediapipe-tasks-vision-0.10.14.tgz)
+          cp "$RUNNER_TEMP/package/vision_bundle.mjs" $A/mediapipe/vision_bundle.js
+          cp "$RUNNER_TEMP"/package/wasm/* $A/mediapipe/wasm/
+          curl -sSfL -o $A/efficientdet_lite0.tflite https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite
+          ls -la $A $A/mediapipe/wasm
           cd enquadra
 
           cat > settings.gradle.kts <<'EOF'
@@ -63,8 +70,8 @@ jobs:
                   applicationId = "pt.filipe.enquadra"
                   minSdk = 29
                   targetSdk = 34
-                  versionCode = 8
-                  versionName = "0.8"
+                  versionCode = 9
+                  versionName = "0.9"
               }
               signingConfigs {
                   getByName("debug") {
@@ -757,5 +764,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: enquadra-apk-0.8
+          name: enquadra-apk-0.9
           path: enquadra/app/build/outputs/apk/debug/app-debug.apk
