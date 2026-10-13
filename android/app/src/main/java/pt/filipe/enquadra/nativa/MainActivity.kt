@@ -62,6 +62,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var grid = true; private var levelOn = true
     private var lastMatch = ""
     private var scanAt = 0L
+    private var autoLock = false      // emulator test only: the camera cannot be moved there
 
     private lateinit var set: Settings
     private lateinit var gem: Gemini
@@ -101,6 +102,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
         installCrashLog()
+        autoLock = intent?.getBooleanExtra("autolock", false) == true
         F.load(this)
         set = Settings(this); gem = Gemini(set); cam = Cam(this)
         ratio = set.ratio.toDouble(); grid = set.grid; levelOn = set.level
@@ -336,7 +338,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             var fx = L.ox + f.x.toFloat() * L.s; var fy = L.oy + f.y.toFloat() * L.s; var fw = f.w.toFloat() * L.s; var fh = f.h.toFloat() * L.s
             val dx = fx + fw / 2 - cx; val dy = fy + fh / 2 - cy; val dist = hypot(dx, dy); val tol = min(L.VW, L.VH) * .05f
             if (phase == "guide") {
-                aligned = dist < tol
+                aligned = dist < tol || autoLock
                 if (aligned) { if (alignedSince == 0L) alignedSince = now; if (now - alignedSince > 350) lock() } else alignedSince = 0
             } else aligned = phase == "locked" || phase == "lock"
             var ease = 0f
@@ -650,14 +652,14 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         val v = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(C.INK); isClickable = true }
         val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; minimumHeight = dpi(40) }
         val back = FrameLayout(this).apply { background = bg(C.PANEL, dp(21)); addView(Icon(this@MainActivity, "back", C.FG), FrameLayout.LayoutParams(-1, -1)); setOnClickListener { stepBack() } }
-        val infoT = text(11f, C.MUTED, F.mono, info).apply { gravity = Gravity.CENTER }.oneLine()
+        val infoT = text(11f, C.MUTED, F.mono, info).apply { gravity = Gravity.CENTER; maxLines = 2 }
         head.addView(back, LinearLayout.LayoutParams(dpi(42), dpi(42))); head.addView(infoT, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dpi(10); rightMargin = dpi(52) })
         val k = min(1f, 2048f / max(bmp.width, bmp.height))
         val show = if (k < 1f) Bitmap.createScaledBitmap(bmp, (bmp.width * k).roundToInt(), (bmp.height * k).roundToInt(), true) else bmp
         val img = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER; setImageBitmap(show) }
         val sub = text(11f, C.MUTED, F.mono, listOfNotNull(pl?.name?.takeIf { it.isNotEmpty() }, pl?.filter?.let { "filtro sugerido: $it" }, pl?.border?.let { "margem: $it" }).joinToString("  ·  ")).apply { gravity = Gravity.CENTER }
         val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        val saved = text(12f, C.MUTED, F.mono, "Os filtros e as margens chegam na fase 2.").oneLine()
+        val saved = text(12f, C.MUTED, F.mono, "Filtros e margens: fase 2.").oneLine()
         val save = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; background = bg(C.AMBER, dp(999)); setPadding(dpi(22), dpi(12), dpi(22), dpi(12))
             addView(Icon(this@MainActivity, "check", 0xFF1A1405.toInt(), 18f), LinearLayout.LayoutParams(dpi(18), dpi(18)).apply { rightMargin = dpi(8) })
@@ -710,7 +712,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private fun para(s: String) = text(13f, C.MUTED, F.ui, s).apply { setLineSpacing(0f, 1.3f) }
     private fun field(vararg vs: View): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        vs.forEachIndexed { i, x -> addView(x, LinearLayout.LayoutParams(-1, -2).apply { if (i > 0) topMargin = dpi(6) }) }
+        vs.forEachIndexed { i, x -> val w = (x.layoutParams?.width ?: -1); addView(x, LinearLayout.LayoutParams(w, -2).apply { if (i > 0) topMargin = dpi(6) }) }
     }
     private fun input(value: String, hint: String, password: Boolean, lines: Int = 1) = EditText(this).apply {
         setText(value); this.hint = hint; setHintTextColor(0xFF55534E.toInt()); setTextColor(C.FG); typeface = if (password) F.mono else F.ui
