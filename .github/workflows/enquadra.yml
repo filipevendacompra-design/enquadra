@@ -925,6 +925,18 @@ jobs:
           fi
           echo "sdk.dir=$ANDROID_HOME" > enquadra/local.properties
 
+      - name: Assinatura fixa
+        env:
+          KS: ${{ secrets.DEBUG_KEYSTORE }}
+        run: |
+          if [ -n "$KS" ]; then
+            mkdir -p ~/.android
+            echo "$KS" | tr -d ' \n\r' | base64 -d > ~/.android/debug.keystore
+            echo "Assinatura fixa: atualizações instalam por cima." >> passos.log
+          else
+            echo "AVISO: sem o segredo DEBUG_KEYSTORE; a assinatura muda em cada compilação." | tee -a passos.log
+          fi
+
       - name: Compilar
         id: compilar
         run: |
