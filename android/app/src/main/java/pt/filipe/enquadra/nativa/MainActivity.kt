@@ -311,21 +311,23 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         val s = max(VW / w, VH / h)
         return Lay(s, (VW - w * s) / 2, (VH - h * s) / 2, VW, VH)
     }
-    private fun tracking() = mode == "live" && (phase == "scan" || phase == "guide")
-    private var tsX: Double? = null; private var tsY = 0.0; private var tsT = 0L
+    private fun tracking() = mode == "live" && (phase == "scan" || phase == "guide" || (phase == "locked" && lockTrackUntil > 0))
+    private var tsX: Double? = null; private var tsY = 0.0; private var tsS = 1.0; private var tsT = 0L
     private fun smoothTrack() {
-        if (!tracking()) { tsX = null; return }
+        if (!tracking()) { tsX = null; tsS = 1.0; return }
         val p = cam.tracker.prev; val k = cam.srcW.toDouble() / (p?.W ?: 128)
-        val tx = cam.tracker.dx * k; val ty = cam.tracker.dy * k; val now = SystemClock.uptimeMillis()
+        val tx = cam.tracker.dx * k; val ty = cam.tracker.dy * k; val ts = cam.tracker.S; val now = SystemClock.uptimeMillis()
         val x = tsX
-        if (x == null) { tsX = tx; tsY = ty } else { val a = 1 - exp(-(now - tsT) / 70.0); tsX = x + (tx - x) * a; tsY += (ty - tsY) * a }
+        if (x == null) { tsX = tx; tsY = ty; tsS = ts } else { val a = 1 - exp(-(now - tsT) / 70.0); tsX = x + (tx - x) * a; tsY += (ty - tsY) * a; tsS += (ts - tsS) * a }
         tsT = now
     }
-    private fun curFrame(): RectD? {
+    /** The frame where the scene is now: it follows the camera's movement and its zoom. */
+    private fun trackedFrame(): RectD? {
         val f = frame ?: return null
-        if (!tracking()) return f
-        return RectD(f.x + (tsX ?: 0.0), f.y + tsY, f.w, f.h)
+        val cx = cam.srcW / 2.0; val cy = cam.srcH / 2.0; val S = tsS
+        return RectD(cx + (f.x - cx) * S + (tsX ?: 0.0), cy + (f.y - cy) * S + tsY, f.w * S, f.h * S)
     }
+    private fun curFrame(): RectD? = if (tracking()) trackedFrame() else frame
 
     // ---------- viewfinder overlay (port of draw()) ----------
     private val pDim = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -341,6 +343,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var lastTf = floatArrayOf(1f, 0f, 0f)
     private var lockFrom = floatArrayOf(1f, 0f, 0f)
     private var zG = 1f; private var zgT = 0L; private var guideDist0 = 0f
+    private var targetZoom = 3.0; private var zS = 1.0; private var lastCmd = 1.0; private var lastCmdT = 0L; private var lockTrackUntil = 0L
     private var effZoom = 1.0; private var lastEffR = -1
 
     private fun applyTransform(z: Float, tx: Float, ty: Float) {
@@ -359,7 +362,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         if (mode == "idle") return
         val now = SystemClock.uptimeMillis()
         val cx = L.VW / 2; val cy = L.VH / 2; val zm = zoomed && mode == "live"
-        if (grid && !zm) { pLine.color = 0x2EFFFFFF; pLine.strokeWidth = 1 * d; pLine.pathEffect = null
+        if (grid && !zm && phase != "locked") { pLine.color = 0x2EFFFFFF; pLine.strokeWidth = 1 * d; pLine.pathEffect = null
             for (i in 1..2) { cv.drawLine(L.VW * i / 3, 0f, L.VW * i / 3, L.VH, pLine); cv.drawLine(0f, L.VH * i / 3, L.VW, L.VH * i / 3, pLine) } }
         val f = curFrame(); var aligned = false
         val camZoom = cam.zoom
@@ -371,28 +374,15 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 if (aligned) { if (alignedSince == 0L) alignedSince = now; if (now - alignedSince > 350) lock() } else alignedSince = 0
             } else aligned = phase == "locked" || phase == "lock"
             var ease = 0f
-            val ztL = min(L.VW / fw, L.VH / fh) * .92f; val txL = cx - (fx + fw / 2) * ztL; val tyL = cy - (fy + fh / 2) * ztL
-            if (zm) {
-                // lock: glide from wherever the aiming zoom was to the frame filling the view
-                val tt = ((now - lockAt) / 700f).coerceIn(0f, 1f)
-                ease = if (tt < .5f) 4 * tt * tt * tt else 1 - (-2 * tt + 2).pow(3) / 2
-                val a = lockFrom
-                val z = a[0] + (ztL - a[0]) * ease; val tx = a[1] + (txL - a[1]) * ease; val ty = a[2] + (tyL - a[2]) * ease
-                applyTransform(z, tx, ty)
-                fx = fx * z + tx; fy = fy * z + ty; fw *= z; fh *= z
-                effZoom = (camZoom * z).toDouble()
-            } else if (phase == "guide" && mode == "live") {
-                // aiming: the closer the frame gets to the centre, the more the view zooms in (as in Framed)
-                if (guideDist0 <= 0f) guideDist0 = max(dist, tol * 3)
-                val prog = (1 - (dist - tol) / (guideDist0 - tol)).coerceIn(0f, 1f)
-                val zWant = 1 + (ztL * .8f - 1).coerceAtLeast(0f) * prog.pow(1.6f)
-                val dt = (now - zgT).coerceIn(0, 100); zgT = now
-                zG += (zWant - zG) * (1 - exp(-dt / 160f))
-                val tx = cx * (1 - zG); val ty = cy * (1 - zG)
-                applyTransform(zG, tx, ty)
-                fx = fx * zG + tx; fy = fy * zG + ty; fw *= zG; fh *= zG
-                effZoom = (camZoom * zG).toDouble()
-            } else effZoom = camZoom.toDouble()
+            if (phase == "locked" || phase == "lock") { val tt = ((now - lockAt) / 700f).coerceIn(0f, 1f); ease = if (tt < .5f) 4 * tt * tt * tt else 1 - (-2 * tt + 2).pow(3) / 2 }
+            if (phase == "guide" && mode == "live") driveZoom(dist / tsS.toFloat(), tol, now)
+            if (phase == "locked" && lockTrackUntil > 0 && now >= lockTrackUntil) {
+                // the zoom has settled on the lens: the frame stops following and stays put, as in the web version
+                trackedFrame()?.let { t -> val sw = cam.srcW.toDouble(); val sh = cam.srcH.toDouble(); val w = min(t.w, sw); val h = min(t.h, sh)
+                    frame = RectD(cl(t.x, 0.0, sw - w), cl(t.y, 0.0, sh - h), w, h) }
+                lockTrackUntil = 0; cam.trackOn = false
+            }
+            effZoom = camZoom.toDouble()
             val effR = (effZoom * 10).roundToInt()
             if (effR != lastEffR) { lastEffR = effR; renderLenses() }
             val col = if (aligned) C.LOCK else C.AMBER
@@ -437,6 +427,20 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             cv.drawLine(cx - 7 * d, cy, cx + 7 * d, cy, pLine); cv.drawLine(cx, cy - 7 * d, cx, cy + 7 * d, pLine)
         }
         if (phase == "scan") drawScan(cv, L, d, now)
+    }
+
+    /**
+     * Aiming = zooming: the closer the frame gets to the centre, the closer the real camera zoom gets to the lens
+     * chosen for the shot. The phone switches lenses by itself on the way, as when you pinch to zoom.
+     */
+    private fun driveZoom(distRef: Float, tol: Float, now: Long) {
+        if (guideDist0 <= 0f) guideDist0 = max(distRef, tol * 3)
+        val prog = (1 - (distRef - tol) / (guideDist0 - tol)).coerceIn(0f, 1f).toDouble()
+        val z0 = homeZoom.toDouble(); val zt = targetZoom
+        val zWant = z0 * (zt / z0).pow(prog.pow(1.3))
+        val dt = (now - zgT).coerceIn(0, 100); zgT = now
+        zS += (zWant - zS) * (1 - exp(-dt / 220.0))
+        if (abs(zS / lastCmd - 1) > .006 && now - lastCmdT > 40) { cam.setZoom(zS.toFloat()); lastCmd = zS; lastCmdT = now }
     }
 
     private fun guides(cv: Canvas, fx: Float, fy: Float, fw: Float, fh: Float) {
@@ -585,7 +589,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 if (pl == null) { pl = Plan(null, null, look.styles[seen.size % look.styles.size], ""); who = "local" }
                 val plan0 = pl!!
                 val (fw, fh) = featureSize(srcW, srcH)
-                val z0 = cam.zoom; val stops = lensStops()
+                val z0 = cam.zoom; val stops = lensStops(); targetZoom = z0.toDouble()
                 var lensTxt = ""
                 val c = withContext(Dispatchers.Default) {
                     val small = Bitmap.createScaledBitmap(snap, fw, fh, true); val px = IntArray(fw * fh); small.getPixels(px, 0, fw, 0, 0, fw, fh)
@@ -598,7 +602,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         val zRaw = z0 * LENS_FILL / s0
                         val L = pickLens(zRaw, stops, plan0.subj, z0, srcW, srcH)
                         val s = (z0 * LENS_FILL / L).coerceIn(.06, 1.0)
-                        lensTxt = "lente ${fmtZ(L)}"
+                        lensTxt = "lente ${fmtZ(L)}"; targetZoom = L
                         if (abs(s / s0 - 1) > .03) cr = bestCrop(F, plan0.subj, ratio, plan0.rule, CropOpt(listOf(s), cr.x0 + cr.cw / 2.0, cr.y0 + cr.ch / 2.0, .06)) ?: cr
                     }
                     cr?.let { toFrame(it, F, srcW, srcH, ratio) }
@@ -608,7 +612,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 if (phase != "scan") return@launch     // cancelled meanwhile
                 plan = plan0; subj = plan0.subj; style = plan0.rule; tip = plan0.tip.ifEmpty { LOCAL_TIP[plan0.rule] ?: "" }
                 label = plan0.name.ifEmpty { plan0.subj?.name ?: "" }
-                frame = c
+                frame = c; zS = cam.zoom.toDouble(); lastCmd = zS; guideDist0 = 0f
                 seen.add(label.ifEmpty { "zona ${c.x.roundToInt()},${c.y.roundToInt()}" })
                 phase = "guide"
             } catch (e: Throwable) { phase = "idle"; cam.trackOn = false; setMsg(errCopy(e), "err") }
@@ -618,65 +622,17 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     /** Aligned: the frame stops where it was and the preview zooms into it; then the right lens takes over. */
     private fun lock() {
-        val f = curFrame() ?: return
-        val sw = cam.srcW.toDouble(); val sh = cam.srcH.toDouble()
-        val w = min(f.w, sw); val h = min(f.h, sh)
-        frame = RectD(cl(f.x, 0.0, sw - w), cl(f.y, 0.0, sh - h), w, h)
-        lockFrom = lastTf.copyOf()
-        cam.trackOn = false; phase = "locked"; zoomed = true; lockAt = SystemClock.uptimeMillis(); alignedSince = 0
+        if (curFrame() == null) return
+        phase = "locked"; zoomed = false; lockAt = SystemClock.uptimeMillis(); alignedSince = 0
+        cam.setZoom(targetZoom.toFloat()); lastCmd = targetZoom; zS = targetZoom
+        lockTrackUntil = lockAt + 900      // keep following while the zoom lands on the lens
+        lastMatch = "zoom real até ${fmtZ(targetZoom)}"
         setMsg(tip.ifEmpty { "Enquadrado. Tira a foto." }, "ok"); ui()
-        val token = lockAt
-        pv.postDelayed({ if (phase == "locked" && lockAt == token) lifecycleScope.launch { opticalSwitch(token) } }, 750)
-    }
-
-    /**
-     * Phase 1's main point: the photo must come from the lens that fills the frame, at full resolution.
-     * The view is frozen, the camera zooms optically, then the frame is found again in the new picture
-     * (a different lens sees from a slightly different place), and the live view comes back already aligned.
-     */
-    private suspend fun opticalSwitch(token: Long) {
-        val f = frame ?: return
-        val sw = cam.srcW.toDouble(); val sh = cam.srcH.toDouble()
-        val z0 = cam.zoom; val k = min(sw / f.w, sh / f.h) * LENS_FILL
-        var zt = (z0 * k).toFloat().coerceIn(cam.minZoom, cam.maxZoom)
-        // land exactly on the real lens (2.98x would still be a crop of the main camera)
-        lensStops().minByOrNull { abs(ln(it / zt)) }?.let { if (abs(ln(it / zt)) < .12) zt = it.toFloat() }
-        val zr = zt / z0
-        if (zr < 1.25f) { lastMatch = "sem troca de lente (zoom ${"%.1f".format(zt)}×)"; return }
-        val g0 = hiGray(320) ?: return
-        if (phase != "locked" || lockAt != token) return
-        val kg = g0.W / sw
-        val TW = 40; val TH = max(16, (TW / ratio).roundToInt())
-        val ref = sampleGray(g0, f.x * kg, f.y * kg, f.w * kg, f.h * kg, TW, TH)
-        // freeze what the screen shows while the lens changes
-        pv.bitmap?.let { freeze.setImageBitmap(it); freeze.alpha = 1f; freeze.visibility = View.VISIBLE }
-        phase = "lock"; setMsg("A passar para a lente ${"%.1f".format(zt)}×…", "ok"); ui()
-        suspendCancellableCoroutine<Unit> { c -> cam.setZoom(zt) { if (c.isActive) c.resume(Unit) } }
-        val s0 = cam.seq; val t0 = SystemClock.uptimeMillis()
-        while (cam.seq < s0 + 8 && SystemClock.uptimeMillis() - t0 < 1500) kotlinx.coroutines.delay(30)   // let the lens settle
-        if (phase != "lock" || lockAt != token) return
-        val g1 = hiGray(320) ?: return
-        val zrReal = cam.zoom / z0
-        // where the frame would be if both lenses looked from the same point
-        val ecx = g1.W / 2.0 + ((f.x + f.w / 2) * kg - g1.W / 2.0) * zrReal; val ecy = g1.H / 2.0 + ((f.y + f.h / 2) * kg - g1.H / 2.0) * zrReal
-        val ew = f.w * kg * zrReal; val eh = f.h * kg * zrReal
-        val loc = withContext(Dispatchers.Default) { locate(ref, TW, TH, g1, ecx - ew / 2, ecy - eh / 2, ew, eh) }
-        if (phase != "lock" || lockAt != token) return
-        val k1 = g1.W / sw
-        var nx: Double; var ny: Double; var nw: Double
-        if (loc != null && loc.err < 30) { nx = loc.x / k1; ny = loc.y / k1; nw = loc.w / k1; lastMatch = "lente ${"%.1f".format(cam.zoom)}× · encaixe ${"%.0f".format(loc.err)}" }
-        else { nx = (ecx - ew / 2) / k1; ny = (ecy - eh / 2) / k1; nw = ew / k1; lastMatch = "lente ${"%.1f".format(cam.zoom)}× · sem encaixe (${loc?.err?.roundToInt() ?: -1}), centrado" }
-        var nh = nw / ratio
-        val cxn = nx + nw / 2; val cyn = ny + nh / 2
-        if (nw > sw) { nw = sw; nh = nw / ratio }; if (nh > sh) { nh = sh; nw = nh * ratio }
-        frame = RectD(cl(cxn - nw / 2, 0.0, sw - nw), cl(cyn - nh / 2, 0.0, sh - nh), nw, nh)
-        lockAt = SystemClock.uptimeMillis() - 1000     // already zoomed: no second animation
-        phase = "locked"; setMsg(tip.ifEmpty { "Enquadrado. Tira a foto." }, "ok"); ui()
-        freeze.animate().alpha(0f).setDuration(180).withEndAction { freeze.visibility = View.GONE; freeze.setImageDrawable(null) }.start()
     }
 
     private fun resetView() {
         zoomed = false; applyTransform(1f, 0f, 0f); alignedSince = 0; lockAt = 0; zG = 1f; guideDist0 = 0f; zgT = 0; lastEffR = -1
+        lockTrackUntil = 0; zS = homeZoom.toDouble(); lastCmd = zS
         freeze.animate().cancel(); freeze.visibility = View.GONE; freeze.setImageDrawable(null)
         if (mode == "live" && abs(cam.zoom - homeZoom) > .01f) cam.setZoom(homeZoom)
     }

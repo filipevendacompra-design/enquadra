@@ -112,6 +112,7 @@ class Cam(private val ctx: Context) {
 
     // ---- analysis thread ----
     private var ybuf = ByteArray(0)
+    private var zPrevFrame = 0.0
 
     private fun onFrame(img: ImageProxy) {
         val crop = img.cropRect; val rot = img.imageInfo.rotationDegrees
@@ -127,7 +128,9 @@ class Cam(private val ctx: Context) {
         if (trackOn || sn != null) {
             val g = yGray(crop, rot, upW, upH, rs, ps, 128)
             if (sn != null) tracker.reset()    // tracking starts from the frame the AI sees
-            tracker.step(g)
+            val zNow = zoom.toDouble()
+            tracker.step(g, if (zPrevFrame > 0) zNow / zPrevFrame else 1.0)
+            zPrevFrame = zNow
         }
         if (hg != null) { val g = yGray(crop, rot, upW, upH, rs, ps, hg.first); main.post { hg.second(g) } }
         if (sn != null) {

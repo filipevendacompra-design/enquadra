@@ -58,11 +58,24 @@ class Tracker {
         return Match(fu, fv, best / n)
     }
 
-    /** One new frame. Called on the camera thread. */
-    fun step(cur: Gray) {
-        if (resetPending) { resetPending = false; dx = 0.0; dy = 0.0; lost = 0; prev = cur; return }
-        val p = prev; prev = cur
-        if (p == null || p.W != cur.W || p.H != cur.H) return
+    /** Scene motion since reset, as a zoom S about the image centre plus a shift (dx, dy): p_now = c + (p_ref - c)·S + (dx, dy). */
+    @Volatile var S = 1.0
+    @Volatile var lastScale = 1.0
+
+    /** prev resampled as if zoomed by s about the centre */
+    private fun warp(a: Gray, s: Double): Gray {
+        val g = FloatArray(a.W * a.H); val cx = a.W / 2.0; val cy = a.H / 2.0
+        for (y in 0 until a.H) { val sy = cy + (y + .5 - cy) / s - .5
+            for (x in 0 until a.W) { val sx = cx + (x + .5 - cx) / s - .5
+                val xx = sx.coerceIn(0.0, a.W - 1.001); val yy = sy.coerceIn(0.0, a.H - 1.001)
+                val x0 = xx.toInt(); val y0 = yy.toInt(); val fx = (xx - x0).toFloat(); val fy = (yy - y0).toFloat(); val i = y0 * a.W + x0
+                val t = a.g[i] + (a.g[i + 1] - a.g[i]) * fx; val bb = a.g[i + a.W] + (a.g[i + a.W + 1] - a.g[i + a.W]) * fx
+                g[y * a.W + x] = t + (bb - t) * fy } }
+        return Gray(g, a.W, a.H)
+    }
+
+    /** Median shift of the 3 most textured blocks from p to cur, with the mean error; null when nothing can be followed. */
+    private fun measure(p: Gray, cur: Gray): Match? {
         val R = 14
         class Pt(val cx: Int, val cy: Int, val v: Double)
         val pts = ArrayList<Pt>()
@@ -79,10 +92,30 @@ class Tracker {
             val c2 = match(p, cur, pt.cx, pt.cy, R, 2, (c1.u * 2).roundToInt(), (c1.v * 2).roundToInt(), true)
             if (c2.err < 22) res.add(c2)
         }
-        if (res.isEmpty()) { lost++; return }
-        lost = 0
+        if (res.isEmpty()) return null
         val mu = res.map { it.u }.sorted()[res.size shr 1]; val mv = res.map { it.v }.sorted()[res.size shr 1]
-        dx += mu; dy += mv
+        return Match(mu, mv, res.sumOf { it.err } / res.size)
+    }
+
+    /**
+     * One new frame. Called on the camera thread. zoomStep: how much the camera zoom changed since the previous frame
+     * (as far as we know; the real value is searched around it, because frames lag the zoom command).
+     */
+    fun step(cur: Gray, zoomStep: Double = 1.0) {
+        if (resetPending) { resetPending = false; dx = 0.0; dy = 0.0; S = 1.0; lost = 0; prev = cur; return }
+        val p = prev; prev = cur
+        if (p == null || p.W != cur.W || p.H != cur.H) return
+        var best: Match? = null; var bs = 1.0
+        val cands = if (abs(zoomStep - 1) < .004 && abs(lastScale - 1) < .004) doubleArrayOf(1.0)
+            else (doubleArrayOf(1.0, zoomStep, lastScale, 1 + (zoomStep - 1) * .5, 1 + (zoomStep - 1) * 1.5)).distinct().toDoubleArray()
+        for (s in cands) {
+            val m = (if (abs(s - 1) < 1e-4) measure(p, cur) else measure(warp(p, s), cur)) ?: continue
+            if (best == null || m.err < best.err - .05) { best = m; bs = s }
+        }
+        val b = best ?: run { lost++; return }
+        lost = 0; lastScale = bs
+        // compose: p_now = c + ((p_ref - c)·S + d)·s + shift
+        S *= bs; dx = dx * bs + b.u; dy = dy * bs + b.v
     }
 }
 
