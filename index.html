@@ -34,12 +34,12 @@ svg{display:block}
 
 #stage{position:relative;border-radius:20px;overflow:hidden;background:#0b0b0b;touch-action:none;min-height:0}
 #stage video,#stage img{position:absolute;inset:0;width:100%;height:100%;max-width:none}
-#stage video{object-fit:cover;transform-origin:0 0;transition:transform .35s ease-out;will-change:transform}
+#stage video{object-fit:cover;transform-origin:0 0;will-change:transform}
 #stage img{object-fit:contain}
 #ov{position:absolute;inset:0;width:100%;height:100%}
 .scan{position:absolute;left:0;right:0;height:2px;background:var(--amber);box-shadow:0 0 18px 4px rgba(245,197,49,.45);top:0;animation:scan 1.5s ease-in-out infinite alternate;pointer-events:none}
 @keyframes scan{to{top:calc(100% - 2px)}}
-@media (prefers-reduced-motion:reduce){.scan{animation:none;top:50%} #stage video{transition:none}}
+@media (prefers-reduced-motion:reduce){.scan{animation:none;top:50%}}
 .chip{position:absolute;font:500 12px var(--f-mono);color:var(--amber);background:rgba(0,0,0,.55);border-radius:8px;padding:4px 8px;white-space:nowrap;max-width:70%;overflow:hidden;text-overflow:ellipsis;pointer-events:none;display:flex;align-items:center;gap:6px}
 .chip b{width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
 .chip.ok{color:var(--lock)}
@@ -110,9 +110,14 @@ svg{display:block}
 .iconbtn{width:42px;height:42px;border-radius:50%;background:var(--panel);display:grid;place-items:center;color:var(--fg)}
 .iconbtn.arm{background:var(--warn);color:#1a0d05}
 
-.gal-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;overflow-y:auto;align-content:start;min-height:0}
-.gal-grid button{aspect-ratio:1;background:var(--panel);border-radius:6px;overflow:hidden}
-.gal-grid img{width:100%;height:100%;object-fit:cover;display:block}
+.gal-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 12px;overflow-y:auto;align-content:start;min-height:0;padding-bottom:8px}
+.gal-day{grid-column:1/-1;font:11px var(--f-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);padding-top:6px;border-top:1px solid var(--line)}
+.gal-day:first-child{border-top:0;padding-top:0}
+.gal-card{display:grid;gap:7px;text-align:left;min-width:0}
+.gal-card .ph{aspect-ratio:4/5;border-radius:12px;overflow:hidden;background:var(--panel)}
+.gal-card img{width:100%;height:100%;object-fit:cover;display:block}
+.gal-card b{font-weight:500;font-size:13px;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gal-card small{font:11px var(--f-mono);color:var(--muted);margin-top:-4px}
 .gal-empty{grid-column:1/-1;color:var(--muted);text-align:center;padding:40px 12px;margin:0}
 .note{font:12px var(--f-mono);color:var(--muted);margin:0}
 
@@ -218,6 +223,17 @@ svg{display:block}
       <button class="btn" id="btnTest">Testar ligação</button>
       <p class="test-out" id="testOut"></p>
     </div>
+    <div class="field">
+      <span class="label">Link para testadores</span>
+      <p>Quem abrir este link fica com a tua chave guardada no telemóvel, sem a colar. Partilha só com quem confias: a chave fica visível no link.</p>
+      <input type="text" id="shareLink" readonly>
+      <button class="btn" id="btnCopyLink">Copiar link</button>
+      <p class="test-out" id="copyOut"></p>
+    </div>
+    <label class="field" style="grid-template-columns:auto 1fr;align-items:center;gap:10px">
+      <input type="checkbox" id="fullres" style="width:20px;height:20px;accent-color:var(--amber)">
+      <span>Foto em resolução total (mais nítida, demora um pouco mais)</span>
+    </label>
   </div>
 </div>
 
@@ -245,7 +261,7 @@ const S = {
   roll:0, level:false, camZoom:1, homeZoom:1, zoomCaps:null, cams:[], camId:null,
   shot:null, shotZoom:1, shotDate:null, meta:null, liveMeta:null, photoMeta:null, cur:null,
   filter:"clean", border:"none", note:"",
-  set:{ gkey:store.get("gkey",""), gmodel:store.get("gmodel","gemini-3.5-flash-lite") }
+  set:{ gkey:store.get("gkey",""), gmodel:store.get("gmodel","gemini-3.5-flash-lite"), fullres:store.get("fullres",true) }
 };
 
 /* ---------- Who picks the shot ---------- */
@@ -272,9 +288,12 @@ const PROMPT = (w,h) => {
   const avoid = S.seen.length ? `\nThe user asked for another option: choose something different from ${S.seen.slice(-4).map(x=>`"${x}"`).join(", ")}.` : "";
   return `You are a photo director helping someone take a striking phone photo. The image is the live camera view (${w>h?"landscape":"portrait"}, ${w}x${h}).
 Pick ONE subject in it that would make the most beautiful photo when isolated with a moderate telephoto (about 2x zoom). Favour: light (sun, golden light, glowing windows, light through leaves), reflections, silhouettes, strong shapes, one isolated object, textures, leading lines that end in something. Avoid: things cut by the image edge, clutter, plain empty sky. Never pick a lamp, street light or light bulb as the subject; choose what the light falls on, its glow on a surface, or its reflection, and keep bright lamps away from the edges of the shot. The sun at sunset is fine.
-Then propose the shot: a rectangle with width:height = ${S.ratio.toFixed(3)} that contains the subject, places it with a composition rule, and covers roughly 30-55% of the image width.${avoid}
+Then propose the shot: a rectangle with width:height = ${S.ratio.toFixed(3)} that contains the subject, places it with a composition rule, and covers roughly 30-55% of the image width.
+Finally choose the look of the finished photo to match the mood of that shot (do not default to the same every time):
+filter, one of: clean (natural), vivo (punchy colour), quente (warm), claro (bright and airy), suave (soft, faded), pelicula (film with grain), dourado (golden glow), cinema (teal and orange, vignette), porto (crisp, clean contrast), dusk (warm evening), relic (vintage), lofi (high contrast, saturated), pb (black and white), noir (dramatic black and white).
+border, one of: none, white (thin white), ficha (white with camera specs), polaroid (instant photo with handwritten caption), galeria (museum mat), pelicula (film frame), desfocado (blurred square backdrop), paper (cream paper with caption), date (orange date stamp).${avoid}
 Answer with JSON only:
-{"subject":"short description in European Portuguese, max 4 words, lowercase","subject_box":[ymin,xmin,ymax,xmax],"shot_box":[ymin,xmin,ymax,xmax],"rule":"tercos|aurea|centro|simetrico|diagonal|minimal|moldura","tip":"short instruction in European Portuguese, max 6 words, e.g. 'Luz bonita, fica aí'"}
+{"subject":"short description in European Portuguese, max 4 words, lowercase","subject_box":[ymin,xmin,ymax,xmax],"shot_box":[ymin,xmin,ymax,xmax],"rule":"tercos|aurea|centro|simetrico|diagonal|minimal|moldura","tip":"short instruction in European Portuguese, max 6 words, e.g. 'Luz bonita, fica aí'","filter":"one id from the list","border":"one id from the list"}
 Coordinates are integers normalized to 0-1000.`;
 };
 function parseJSON(t){
@@ -310,7 +329,9 @@ function fromAI(res){
   let shot=null; const sb=res.shot_box;
   if(Array.isArray(sb)&&sb.length>=4){ const [a,c,d,e]=sb.map(n); shot={x:Math.min(c,e),y:Math.min(a,d),w:Math.abs(e-c),h:Math.abs(d-a)}; if(shot.w<.05||shot.h<.05) shot=null; }
   const rule=STYLE_IDS.includes(res.rule)?res.rule:"tercos";
-  return {subj, shot, rule, tip:String(res.tip||"").slice(0,60)};
+  const filter=FILTERS.some(f=>f[0]===res.filter)?res.filter:null;
+  const border=BORDERS.some(b=>b[0]===res.border)?res.border:null;
+  return {subj, shot, rule, tip:String(res.tip||"").slice(0,60), filter, border};
 }
 function errCopy(e){
   const c=(e&&e.code)||"", m=((e&&e.msg)||"").toLowerCase();
@@ -780,7 +801,7 @@ function srcEl(){ return S.mode==="live"?video:S.mode==="photo"?still:null; }
 async function findShot(){
   if(S.busy) return; const el=srcEl(); if(!el||!S.src.w) return;
   await resetView();
-  S.busy=true; S.phase="scan"; S.frame=null; S.note=""; $("#scan").hidden=false; ui();
+  S.busy=true; S.phase="scan"; S.frame=null; S.note=""; S.plan=null; $("#scan").hidden=false; ui();
   setMsg("A procurar a foto…");
   try{
     const F=features(el); vtReset();            // the scene is measured at this moment; movement is tracked from here
@@ -809,27 +830,21 @@ async function findShot(){
   }catch(e){ S.phase="idle"; setMsg(errCopy(e),"err"); }
   finally{ S.busy=false; $("#scan").hidden=true; ui(); }
 }
-const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function lock(){
-  S.phase="lock"; S.frame=curFrame(); vtReset(); ui();
-  setMsg("Centrado — a enquadrar…","ok");
-  const f=S.frame, maxW=Math.min(S.src.w,S.src.h*S.ratio), need=Math.max(1,maxW/f.w);
-  let zr=1;
-  if(S.zoomCaps){
-    const before=S.camZoom, target=cl(before*need,S.zoomCaps.min,S.zoomCaps.max);
-    if(target>before*1.05 && await applyZoom(target)){ zr=S.camZoom/before; await sleep(450); }   // let the lens settle
-  }
-  if(S.phase!=="lock") return;
-  S.lockRem=Math.max(1,need/zr); S.frame=null;
-  S.cssZoom = S.lockRem > 1.04;
-  S.phase="locked"; setMsg(S.tip||"Enquadrado. Tira a foto.","ok"); ui();
+  // The crop stays exactly where the frame was. The preview zooms into that same crop,
+  // so what you see is what gets saved. (A real lens switch shifted the centre on some phones.)
+  const f=curFrame(), w=Math.min(f.w,S.src.w), h=Math.min(f.h,S.src.h);
+  // keep the crop inside the picture, so the preview is exactly what gets saved
+  S.frame={x:cl(f.x,0,S.src.w-w), y:cl(f.y,0,S.src.h-h), w, h};
+  vtReset(); S.phase="locked"; S.cssZoom=true; S.lockAt=performance.now();
+  setMsg(S.tip||"Enquadrado. Tira a foto.","ok"); ui();
 }
 async function resetView(){
   S.cssZoom=false; video.style.transform=""; S.alignedSince=0; S.lockRem=0;
   if(S.mode==="live" && S.zoomCaps && Math.abs(S.camZoom-S.homeZoom)>.01) await applyZoom(S.homeZoom);
 }
 async function clearShot(){
-  S.phase="idle"; S.frame=null; S.subj=null; await resetView();
+  S.phase="idle"; S.frame=null; S.subj=null; S.plan=null; await resetView();
   if(S.mode==="live") setMsg("Aponta e toca em ✦ para encontrar a foto.","dim");
   ui();
 }
@@ -889,17 +904,72 @@ async function backToCamera(){
 }
 
 /* ---------- Capture & result ---------- */
-function capture(){
-  const el=srcEl(); if(!el||!S.src.w) return;
+/* Full resolution: take a real photo with the sensor, then find where the preview sits inside it
+   (the video is usually a smaller, cropped version of the sensor) and cut the same frame out of it. */
+function grayOf(src,sx,sy,sw,sh,W,H){
+  const c=document.createElement("canvas"); c.width=W; c.height=H;
+  const x=c.getContext("2d",{willReadFrequently:true}); x.drawImage(src,sx,sy,sw,sh,0,0,W,H);
+  const d=x.getImageData(0,0,W,H).data, g=new Float32Array(W*H); let m=0;
+  for(let i=0,j=0;i<g.length;i++,j+=4){ g[i]=.299*d[j]+.587*d[j+1]+.114*d[j+2]; m+=g[i]; }
+  m/=g.length; for(let i=0;i<g.length;i++) g[i]-=m; return g;
+}
+function mad(a,b){ let e=0; for(let i=0;i<a.length;i++) e+=Math.abs(a[i]-b[i]); return e/a.length; }
+function locatePreview(bmp,ref,VW,VH,RW,RH){
+  const pw=bmp.width, ph=bmp.height, z=S.camZoom||1, ks=new Set();
+  for(const k of [pw/VW, ph/VH]) for(const zz of [1,1/z,z]) ks.add(k*zz);
+  let best=null;
+  const test=(k,ox,oy)=>{ const w=VW*k, h=VH*k;
+    if(ox<-2||oy<-2||ox+w>pw+2||oy+h>ph+2) return;
+    const e=mad(ref,grayOf(bmp,ox,oy,w,h,RW,RH)); if(!best||e<best.e) best={k,ox,oy,e}; };
+  for(const k of ks) test(k,(pw-VW*k)/2,(ph-VH*k)/2);
+  if(!best) return null;
+  for(let it=0;it<2;it++){ const st=Math.max(pw,ph)*(it?.008:.025), b0={...best};   // refine the offset
+    for(let dy=-2;dy<=2;dy++) for(let dx=-2;dx<=2;dx++) test(b0.k,b0.ox+dx*st,b0.oy+dy*st); }
+  return best.e<26 ? best : null;   // too different: the photo is not what the preview showed
+}
+async function fullResCrop(r){
+  if(typeof ImageCapture==="undefined") return null;
+  const tr=vtrack(); if(!tr) return null;
+  const VW=S.src.w, VH=S.src.h, RW=96, RH=Math.max(16,Math.round(96*VH/VW));
+  const ref=grayOf(video,0,0,VW,VH,RW,RH);
+  let blob=null;
+  try{
+    const ic=new ImageCapture(tr);
+    try{ const pc=await ic.getPhotoCapabilities(); if(pc&&pc.imageWidth&&pc.imageWidth.max) blob=await ic.takePhoto({imageWidth:pc.imageWidth.max}); }catch{}
+    if(!blob) blob=await ic.takePhoto();
+  }catch{ return null; }
+  let bmp; try{ bmp=await createImageBitmap(blob); }catch{ return null; }
+  const loc=locatePreview(bmp,ref,VW,VH,RW,RH); if(!loc) return null;
+  const x=cl(loc.ox+r.x*loc.k,0,bmp.width-1), y=cl(loc.oy+r.y*loc.k,0,bmp.height-1);
+  const w=Math.min(r.w*loc.k,bmp.width-x), h=Math.min(r.h*loc.k,bmp.height-y);
+  const sc=Math.min(1,4096/Math.max(w,h));
+  const c=document.createElement("canvas"); c.width=Math.round(w*sc); c.height=Math.round(h*sc);
+  c.getContext("2d").drawImage(bmp,x,y,w,h,0,0,c.width,c.height);
+  return c;
+}
+async function capture(){
+  const el=srcEl(); if(!el||!S.src.w||S.capturing) return;
   const {w:SW,h:SH}=S.src;
   let f=curFrame();
   if(!f){ const w=Math.min(SW,SH*S.ratio), h=w/S.ratio; f={x:(SW-w)/2,y:(SH-h)/2,w,h}; }
   const w=Math.min(f.w,SW), h=Math.min(f.h,SH), x=cl(f.x,0,SW-w), y=cl(f.y,0,SH-h);
-  const sc=Math.min(1,4096/Math.max(w,h));
-  const c=document.createElement("canvas"); c.width=Math.round(w*sc); c.height=Math.round(h*sc);
-  c.getContext("2d").drawImage(el,x,y,w,h,0,0,c.width,c.height);
+  let c=null;
+  if(S.mode==="live" && S.set.fullres){
+    S.capturing=true; shutter.disabled=true; setMsg("A tirar a foto em resolução total…","ok");
+    try{ c=await fullResCrop({x,y,w,h}); }catch{ c=null; }
+    S.capturing=false; shutter.disabled=false;
+    S.fullres = !!c;
+  } else S.fullres=false;
+  if(!c){
+    const sc=Math.min(1,4096/Math.max(w,h));
+    c=document.createElement("canvas"); c.width=Math.round(w*sc); c.height=Math.round(h*sc);
+    c.getContext("2d").drawImage(el,x,y,w,h,0,0,c.width,c.height);
+  }
   const digital=Math.sqrt((SW*SH)/(w*h));
   S.shot=c; S.shotZoom=digital*(S.mode==="live"?S.camZoom:1); S.shotDate=new Date();
+  // the look comes from the AI's reading of this scene; without it, start neutral
+  const pl=S.plan; S.filter=(pl&&pl.filter)||"clean"; S.border=(pl&&pl.border)||"none";
+  S.aiLook=!!(pl&&(pl.filter||pl.border));
   S.meta = S.mode==="live" ? {...(S.liveMeta||{}), focal35:26} : S.photoMeta;
   if(S.mode==="photo") S.shotZoom=digital;
   const rec={id:Date.now(), zoom:S.shotZoom, date:S.shotDate.getTime(), meta:S.meta||null, style:S.style,
@@ -1045,7 +1115,8 @@ try{ document.fonts && document.fonts.load('40px "Caveat"').then(()=>{ if(!$("#r
 
 function buildOpts(){
   const info=shotInfo();
-  $("#resInfo").textContent=[S.subj&&S.subj.name, info.settings!=="—"?info.settings:"", info.date].filter(Boolean).join("  ·  ");
+  const mp=(S.shot.width*S.shot.height/1e6);
+  $("#resInfo").textContent=[S.subj&&S.subj.name, (mp>=1?mp.toFixed(1):mp.toFixed(2))+" MP", S.aiLook?"look da IA":"", info.date].filter(Boolean).join("  ·  ");
   // filter thumbnails rendered from the photo itself
   const fb=$("#filters"); fb.innerHTML="";
   const sm=document.createElement("canvas"), k=116/Math.min(S.shot.width,S.shot.height);
@@ -1094,7 +1165,7 @@ const DB={
   async all(){ const r=await this.tx("readonly",st=>st.getAll()); return (r||[]).sort((a,b)=>b.id-a.id); }
 };
 function makeThumb(c){
-  const t=document.createElement("canvas"), k=240/Math.min(c.width,c.height);
+  const t=document.createElement("canvas"), k=Math.min(1,480/Math.min(c.width,c.height));
   t.width=Math.round(c.width*k); t.height=Math.round(c.height*k); t.getContext("2d").drawImage(c,0,0,t.width,t.height);
   return new Promise(r=>t.toBlob(r,"image/jpeg",.8));
 }
@@ -1110,15 +1181,26 @@ async function renderGallery(){
   const grid=$("#galGrid"); grid.innerHTML=""; galURLs.forEach(u=>URL.revokeObjectURL(u)); galURLs=[];
   let recs; try{ recs=await DB.all(); }catch{ grid.innerHTML='<p class="gal-empty">A galeria não está disponível neste browser.</p>'; return; }
   if(!recs.length){ grid.innerHTML='<p class="gal-empty">Ainda não há fotos. Tira uma com a câmara da app.</p>'; return; }
-  recs.forEach(r=>{ const b=document.createElement("button"), img=new Image(), u=URL.createObjectURL(r.thumb||r.blob); galURLs.push(u);
-    img.src=u; img.alt="Foto de "+new Date(r.date).toLocaleDateString("pt-PT"); b.appendChild(img); b.onclick=()=>openRecord(r); grid.appendChild(b); });
+  const dayKey=d=>d.toISOString().slice(0,10), today=new Date(), yest=new Date(Date.now()-864e5);
+  const dayName=d=> dayKey(d)===dayKey(today)?"Hoje" : dayKey(d)===dayKey(yest)?"Ontem" : d.toLocaleDateString("pt-PT",{weekday:"long",day:"numeric",month:"long"});
+  let last="";
+  recs.forEach(r=>{
+    const d=new Date(r.date), k=dayKey(d);
+    if(k!==last){ last=k; const h=document.createElement("div"); h.className="gal-day"; h.textContent=dayName(d); grid.appendChild(h); }
+    const b=document.createElement("button"); b.className="gal-card";
+    const ph=document.createElement("span"); ph.className="ph"; const img=new Image(), u=URL.createObjectURL(r.thumb||r.blob); galURLs.push(u);
+    img.src=u; img.alt=""; img.loading="lazy"; ph.appendChild(img);
+    const t=document.createElement("b"); t.textContent=r.subj||"foto";
+    const m=document.createElement("small"); m.textContent=d.toLocaleTimeString("pt-PT",{hour:"2-digit",minute:"2-digit"})+(r.zoom?`  ·  ${Math.round(26*r.zoom)} mm`:"");
+    b.append(ph,t,m); b.setAttribute("aria-label",(r.subj||"foto")+", "+d.toLocaleString("pt-PT")); b.onclick=()=>openRecord(r); grid.appendChild(b);
+  });
 }
 async function openGallery(){ await renderGallery(); $("#gallery").hidden=false; pushLayer("gallery"); }
 async function openRecord(r){
   try{
     const bmp=await createImageBitmap(r.blob), c=document.createElement("canvas"); c.width=bmp.width; c.height=bmp.height; c.getContext("2d").drawImage(bmp,0,0);
     S.shot=c; S.shotZoom=r.zoom||1; S.shotDate=new Date(r.date); S.meta=r.meta; if(r.style) S.style=r.style;
-    S.subj=r.subj?{name:r.subj}:null; S.filter=r.filter||"clean"; S.border=r.border||"none"; S.cur=r;
+    S.subj=r.subj?{name:r.subj}:null; S.filter=r.filter||"clean"; S.border=r.border||"none"; S.cur=r; S.aiLook=false;
     buildOpts(); renderResult(); $("#result").hidden=false; pushLayer("result");
   }catch{ setMsg("Não consegui abrir essa foto.","err"); }
 }
@@ -1159,14 +1241,17 @@ function draw(){
       const now=performance.now();
       if(aligned){ if(!S.alignedSince) S.alignedSince=now; if(now-S.alignedSince>350) lock(); } else S.alignedSince=0;
     } else aligned = S.phase==="locked"||S.phase==="lock";
+    let ease=0;
     if(zoomed){
-      const z=Math.min(L.VW/fw,L.VH/fh)*.92, tx=cx-(fx+fw/2)*z, ty=cy-(fy+fh/2)*z;
+      const tt=cl((performance.now()-(S.lockAt||0))/700,0,1); ease=tt<.5?4*tt*tt*tt:1-Math.pow(-2*tt+2,3)/2;
+      const zt=Math.min(L.VW/fw,L.VH/fh)*.92, z=1+(zt-1)*ease;
+      const tx=(cx-(fx+fw/2)*zt)*ease + 0, ty=(cy-(fy+fh/2)*zt)*ease;
       const t=`translate(${tx.toFixed(1)}px,${ty.toFixed(1)}px) scale(${z.toFixed(3)})`;
       if(video.style.transform!==t) video.style.transform=t;
       fx=fx*z+tx; fy=fy*z+ty; fw*=z; fh*=z;
     }
     const col = aligned ? GREEN : AMBER;
-    ctx.save(); ctx.fillStyle = S.phase==="locked" ? "rgba(0,0,0,.72)" : "rgba(0,0,0,.38)";
+    ctx.save(); ctx.fillStyle = `rgba(0,0,0,${(.38+.4*ease).toFixed(3)})`;
     ctx.beginPath(); ctx.rect(0,0,L.VW,L.VH); rrPath(fx,fy,fw,fh,16); ctx.fill("evenodd"); ctx.restore();
     ctx.strokeStyle=aligned?"rgba(123,216,143,.4)":"rgba(245,197,49,.35)"; ctx.lineWidth=1; ctx.beginPath(); guides(fx,fy,fw,fh); ctx.stroke();
     ctx.strokeStyle=col; ctx.lineWidth=2.5; rr(fx,fy,fw,fh,16); ctx.stroke();
@@ -1248,7 +1333,7 @@ aiBtn.onclick=async()=>{
   if(p==="scan"||p==="guide"||p==="lock"){ S.phase="idle"; await clearShot(); return; }
   findShot();
 };
-shutter.onclick=()=>{ if(S.busy||S.mode==="idle") return; if(S.mode==="photo"&&!S.frame) return findShot(); capture(); };
+shutter.onclick=()=>{ if(S.busy||S.capturing||S.mode==="idle") return; if(S.mode==="photo"&&!S.frame) return findShot(); capture(); };
 $("#btnGallery").onclick=openGallery;
 $("#btnGalClose").onclick=stepBack;
 $("#btnBack").onclick=stepBack;
@@ -1280,7 +1365,15 @@ $("#btnShare").onclick=async()=>{
   try{ if(navigator.canShare({files:[file]})) await navigator.share({files:[file]}); }catch{}
 };
 // settings
-$("#btnSet").onclick=()=>{ $("#gkey").value=S.set.gkey; $("#gmodel").value=S.set.gmodel; $("#testOut").textContent=""; renderEngine(); $("#settings").hidden=false; pushLayer("settings"); };
+function testerLink(){ return S.set.gkey ? location.origin+location.pathname+"#k="+encodeURIComponent(S.set.gkey) : ""; }
+$("#btnCopyLink").onclick=async()=>{
+  const v=testerLink(), o=$("#copyOut"), inp=$("#shareLink"); inp.value=v;
+  if(!v){ o.className="test-out err"; o.textContent="Primeiro cola a tua chave."; return; }
+  try{ await navigator.clipboard.writeText(v); o.className="test-out ok"; o.textContent="Link copiado."; }
+  catch{ inp.focus(); inp.select(); o.className="test-out"; o.textContent="Seleciona o link acima e copia."; }
+};
+$("#fullres").addEventListener("change",e=>{ S.set.fullres=e.target.checked; store.set("fullres",S.set.fullres); });
+$("#btnSet").onclick=()=>{ $("#gkey").value=S.set.gkey; $("#gmodel").value=S.set.gmodel; $("#testOut").textContent=""; $("#shareLink").value=testerLink(); $("#copyOut").textContent=""; $("#fullres").checked=S.set.fullres; renderEngine(); $("#settings").hidden=false; pushLayer("settings"); };
 $("#btnSetClose").onclick=stepBack;
 $("#gkey").addEventListener("change",e=>{ S.set.gkey=e.target.value.trim(); store.set("gkey",S.set.gkey); renderEngine(); });
 $("#gmodel").addEventListener("change",e=>{ S.set.gmodel=e.target.value; store.set("gmodel",S.set.gmodel); });
@@ -1292,6 +1385,12 @@ $("#btnTest").onclick=async()=>{
   catch(e){ o.className="test-out err"; o.textContent=errCopy(e)+(e&&e.msg?" ("+e.msg.slice(0,90)+")":""); }
 };
 
+// A tester link carries the key after #k= ; it is saved on this phone and removed from the address bar.
+(function keyFromLink(){
+  const m=location.hash.match(/[#&]k=([^&]+)/); if(!m) return;
+  try{ S.set.gkey=decodeURIComponent(m[1]).trim(); store.set("gkey",S.set.gkey); }catch{}
+  try{ history.replaceState(null,"",location.pathname+location.search); }catch{}
+})();
 renderEngine(); ui(); initRuntime(); refreshThumb(); requestAnimationFrame(draw);
 startLive();
 })();
