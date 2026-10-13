@@ -213,6 +213,21 @@ svg{display:block}
       <div class="warnbox">No nível gratuito, a Google pode usar as imagens enviadas para melhorar os produtos dela, e revisores humanos podem vê-las. Evita usar a IA em fotos privadas.</div>
     </div>
     <div class="field">
+      <label class="label" for="persona">Olhar do fotógrafo</label>
+      <select id="persona">
+        <option value="criativo">Criativo · ousado, detalhes, luz, reflexos</option>
+        <option value="equilibrado">Equilibrado · motivo forte, boa luz</option>
+        <option value="classico">Clássico · regras, limpo, seguro</option>
+        <option value="minimal">Minimalista · espaço vazio, simples</option>
+        <option value="documental">Documental · pessoas e momentos</option>
+      </select>
+    </div>
+    <div class="field">
+      <label class="label" for="extra">Instruções tuas para a IA (opcional)</label>
+      <textarea id="extra" rows="3" maxlength="400" placeholder="Ex.: gosto de silhuetas e de preto e branco; evita carros." style="background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:11px 12px;color:var(--fg);font:14px var(--f-ui);width:100%;resize:vertical"></textarea>
+      <p>Escreve como falarias com um fotógrafo. A IA segue isto em todas as análises.</p>
+    </div>
+    <div class="field">
       <label class="label" for="gmodel">Modelo</label>
       <select id="gmodel">
         <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite · rápido</option>
@@ -261,7 +276,8 @@ const S = {
   roll:0, level:false, camZoom:1, homeZoom:1, zoomCaps:null, cams:[], camId:null,
   shot:null, shotZoom:1, shotDate:null, meta:null, liveMeta:null, photoMeta:null, cur:null,
   filter:"clean", border:"none", note:"",
-  set:{ gkey:store.get("gkey",""), gmodel:store.get("gmodel","gemini-3.5-flash-lite"), fullres:store.get("fullres",true) }
+  set:{ gkey:store.get("gkey",""), gmodel:store.get("gmodel","gemini-3.5-flash-lite"), fullres:store.get("fullres",true),
+        persona:store.get("persona","criativo"), extra:store.get("extra","") }
 };
 
 /* ---------- Who picks the shot ---------- */
@@ -284,11 +300,32 @@ function renderEngine(){
     "Motor local, grátis e sem internet: deteta pessoas, animais e veículos e calcula a composição. Não percebe luz nem reflexos; para isso, cola uma chave do Gemini.";
 }
 
+/* How the photo director thinks. Each style changes what it looks for, how bold the crop is and how much it varies. */
+const PERSONAS={
+  classico:{label:"Clássico", temp:.3, range:[.35,.65], cover:"30-55%",
+    text:`Style: classic and clean. One clear, readable subject, placed on the rule of thirds or centred when symmetric. Calm, balanced framing with breathing room. Natural looks: prefer clean, porto, claro, quente; borders none, white or ficha.`},
+  equilibrado:{label:"Equilibrado", temp:.5, range:[.3,.65], cover:"30-55%",
+    text:`Style: balanced. A strong subject with good light, placed with a composition rule that suits the scene.`},
+  criativo:{label:"Criativo", temp:.95, range:[.2,.75], cover:"20-60%",
+    text:`Style: creative and bold, like a street or fine-art photographer with a strong eye. Look past the obvious subject. Seek:
+- details and textures most people miss; patterns and repetition, ideally with one element that breaks it;
+- light as the subject: backlight, rim light, hard shadows, light and shadow shapes, glow, silhouettes;
+- reflections in glass, water and puddles; layers with something in the foreground framing the scene;
+- abstract geometry: lines, curves, diagonals, colour blocks, minimal compositions with a small subject in a large empty space.
+Frame with intent and some tension: off-centre placement, a tight crop on a detail, strong diagonals, deliberate negative space. A deliberate cut is fine; an accidental one is not.
+Choose looks with character when they fit the mood (cinema, pelicula, noir, pb, dusk, dourado, lofi) and borders that complete the idea. The tip should be evocative but still a concrete instruction.`},
+  minimal:{label:"Minimalista", temp:.6, range:[.25,.6], cover:"25-55%",
+    text:`Style: minimalist. One simple element, lots of clean negative space, few colours, simple geometry. Avoid busy areas. Looks: suave, claro, pb; borders galeria, white or none.`},
+  documental:{label:"Documental", temp:.5, range:[.35,.7], cover:"35-65%",
+    text:`Style: documentary. People, gestures and everyday moments first; otherwise the detail that tells the story of the place. Honest framing, little stylisation. Looks: clean, pelicula, pb; borders ficha, date or none.`}
+};
+function persona(){ return PERSONAS[S.set.persona]||PERSONAS.criativo; }
 const PROMPT = (w,h) => {
   const avoid = S.seen.length ? `\nThe user asked for another option: choose something different from ${S.seen.slice(-4).map(x=>`"${x}"`).join(", ")}.` : "";
   return `You are a photo director helping someone take a striking phone photo. The image is the live camera view (${w>h?"landscape":"portrait"}, ${w}x${h}).
+${persona().text}${S.set.extra?`\nThe photographer's own direction (follow it): ${S.set.extra.slice(0,400)}`:""}
 Pick ONE subject in it that would make the most beautiful photo when isolated with a moderate telephoto (about 2x zoom). Favour: light (sun, golden light, glowing windows, light through leaves), reflections, silhouettes, strong shapes, one isolated object, textures, leading lines that end in something. Avoid: things cut by the image edge, clutter, plain empty sky. Never pick a lamp, street light or light bulb as the subject; choose what the light falls on, its glow on a surface, or its reflection, and keep bright lamps away from the edges of the shot. The sun at sunset is fine.
-Then propose the shot: a rectangle with width:height = ${S.ratio.toFixed(3)} that contains the subject, places it with a composition rule, and covers roughly 30-55% of the image width.
+Then propose the shot: a rectangle with width:height = ${S.ratio.toFixed(3)} that contains the subject, places it with a composition rule, and covers roughly ${persona().cover} of the image width.
 Finally choose the look of the finished photo to match the mood of that shot (do not default to the same every time):
 filter, one of: clean (natural), vivo (punchy colour), quente (warm), claro (bright and airy), suave (soft, faded), pelicula (film with grain), dourado (golden glow), cinema (teal and orange, vignette), porto (crisp, clean contrast), dusk (warm evening), relic (vintage), lofi (high contrast, saturated), pb (black and white), noir (dramatic black and white).
 border, one of: none, white (thin white), ficha (white with camera specs), polaroid (instant photo with handwritten caption), galeria (museum mat), pelicula (film frame), desfocado (blurred square backdrop), paper (cream paper with caption), date (orange date stamp).${avoid}
@@ -309,7 +346,7 @@ async function askGemini(b64, prompt){
     r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(S.set.gmodel)}:generateContent`,{
       method:"POST", headers:{"content-type":"application/json","x-goog-api-key":S.set.gkey},
       body:JSON.stringify({contents:[{role:"user",parts:[{text:prompt},...(b64?[{inline_data:{mime_type:"image/jpeg",data:b64}}]:[])]}],
-        generationConfig:{responseMimeType:"application/json",temperature:.4}})
+        generationConfig:{responseMimeType:"application/json",temperature:persona().temp}})
     });
   }catch{ throw {code:"g_net"}; }
   if(!r.ok){ let m=""; try{ m=((await r.json()).error||{}).message||""; }catch{} throw {code:"g_"+r.status, msg:m}; }
@@ -612,7 +649,7 @@ function planCrop(F,plan){
   const maxW=Math.min(S.src.w, S.src.h*S.ratio);
   if(plan.shot){
     const sw=plan.shot.w*S.src.w, sh=plan.shot.h*S.src.h, w=Math.sqrt(sw*sh*S.ratio);
-    const s0=cl(w/maxW,.3,.65), k=F.W/S.src.w;
+    const [lo,hi]=persona().range, s0=cl(w/maxW,lo,hi), k=F.W/S.src.w;
     return bestCrop(F,plan.subj,S.ratio,plan.rule,{scales:[s0*.88,s0,s0*1.12].map(v=>cl(v,.25,.8)),
       center:{x:(plan.shot.x+plan.shot.w/2)*S.src.w*k, y:(plan.shot.y+plan.shot.h/2)*S.src.h*k}, radius:.06});
   }
@@ -1331,6 +1368,7 @@ function ui(){
 aiBtn.onclick=async()=>{
   const p=S.phase;
   if(p==="scan"||p==="guide"||p==="lock"){ S.phase="idle"; await clearShot(); return; }
+  if(p!=="locked") S.seen=[];     // "different from" only applies when asking for another option on the same scene
   findShot();
 };
 shutter.onclick=()=>{ if(S.busy||S.capturing||S.mode==="idle") return; if(S.mode==="photo"&&!S.frame) return findShot(); capture(); };
@@ -1372,8 +1410,10 @@ $("#btnCopyLink").onclick=async()=>{
   try{ await navigator.clipboard.writeText(v); o.className="test-out ok"; o.textContent="Link copiado."; }
   catch{ inp.focus(); inp.select(); o.className="test-out"; o.textContent="Seleciona o link acima e copia."; }
 };
+$("#persona").addEventListener("change",e=>{ S.set.persona=e.target.value; store.set("persona",S.set.persona); });
+$("#extra").addEventListener("change",e=>{ S.set.extra=e.target.value.trim(); store.set("extra",S.set.extra); });
 $("#fullres").addEventListener("change",e=>{ S.set.fullres=e.target.checked; store.set("fullres",S.set.fullres); });
-$("#btnSet").onclick=()=>{ $("#gkey").value=S.set.gkey; $("#gmodel").value=S.set.gmodel; $("#testOut").textContent=""; $("#shareLink").value=testerLink(); $("#copyOut").textContent=""; $("#fullres").checked=S.set.fullres; renderEngine(); $("#settings").hidden=false; pushLayer("settings"); };
+$("#btnSet").onclick=()=>{ $("#gkey").value=S.set.gkey; $("#gmodel").value=S.set.gmodel; $("#testOut").textContent=""; $("#shareLink").value=testerLink(); $("#copyOut").textContent=""; $("#fullres").checked=S.set.fullres; $("#persona").value=S.set.persona; $("#extra").value=S.set.extra; renderEngine(); $("#settings").hidden=false; pushLayer("settings"); };
 $("#btnSetClose").onclick=stepBack;
 $("#gkey").addEventListener("change",e=>{ S.set.gkey=e.target.value.trim(); store.set("gkey",S.set.gkey); renderEngine(); });
 $("#gmodel").addEventListener("change",e=>{ S.set.gmodel=e.target.value; store.set("gmodel",S.set.gmodel); });
