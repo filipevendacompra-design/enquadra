@@ -564,7 +564,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     cr?.let { toFrame(it, F, srcW, srcH, ratio) }
                 } ?: throw GErr("no_crop")
                 val dt = "%.1f".format((SystemClock.uptimeMillis() - t0) / 1000.0)
-                note = (if (note.isNotEmpty()) "$note  " else "") + "$who · $dt s" + (if (lensTxt.isNotEmpty()) " · $lensTxt" else "")"
+                note = (if (note.isNotEmpty()) "$note  " else "") + "$who · $dt s" + (if (lensTxt.isNotEmpty()) " · $lensTxt" else "")
                 if (phase != "scan") return@launch     // cancelled meanwhile
                 plan = plan0; subj = plan0.subj; style = plan0.rule; tip = plan0.tip.ifEmpty { LOCAL_TIP[plan0.rule] ?: "" }
                 label = plan0.name.ifEmpty { plan0.subj?.name ?: "" }

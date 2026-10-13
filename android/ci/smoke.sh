@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs the app on the emulator: open, find a shot (local AI), shoot, save. Screenshots + logcat go to ci-out/.
+# Runs the app on the emulator: open, find a shot (local AI), lock, change lens, shoot. Screenshots + logcat go to ci-out/
 set -x
 OUT=ci-out; mkdir -p $OUT
 PKG=pt.filipe.enquadra.nativa
