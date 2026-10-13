@@ -220,12 +220,6 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
       <label class="label" for="tier">Análise do Claude</label>
       <select id="tier"><option value="quick">Rápida (1–3 s)</option><option value="default">Detalhada (mais lenta)</option></select>
     </div>
-    <div class="field">
-      <label class="label" for="fov">Campo de visão da lente principal: <span id="fovVal"></span>°</label>
-      <input type="range" id="fov" min="50" max="85" step="1">
-      <p>Afina se a moldura andar mais ou menos do que a cena quando rodas o telemóvel.</p>
-    </div>
-    <label class="check"><input type="checkbox" id="invert"> Inverter direção do seguimento</label>
   </div>
 </div>
 
@@ -571,6 +565,74 @@ function errCopy(e){
   return "Não consegui analisar a cena. Tenta outra vez.";
 }
 
+/* ---------- Visual tracking: how far the scene moved, measured on the image itself ---------- */
+const VT={prev:null, dx:0, dy:0, lost:0, can:null};
+function vtGray(src,sw,sh){
+  const W=128, H=Math.max(32,Math.round(W*sh/sw));
+  if(!VT.can){ VT.can=document.createElement("canvas"); }
+  VT.can.width=W; VT.can.height=H;
+  const x=VT.can.getContext("2d",{willReadFrequently:true});
+  x.drawImage(src,0,0,W,H);
+  const d=x.getImageData(0,0,W,H).data, g=new Float32Array(W*H);
+  for(let i=0,j=0;i<g.length;i++,j+=4) g[i]=.299*d[j]+.587*d[j+1]+.114*d[j+2];
+  return {g,W,H};
+}
+function vtHalf(a){
+  const W=a.W>>1, H=a.H>>1, g=new Float32Array(W*H);
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++){ const i=(2*y)*a.W+2*x; g[y*W+x]=(a.g[i]+a.g[i+1]+a.g[i+a.W]+a.g[i+a.W+1])/4; }
+  return {g,W,H};
+}
+function vtVar(a,cx,cy,r){
+  let s=0,s2=0,n=0;
+  for(let y=cy-r;y<cy+r;y+=2) for(let x=cx-r;x<cx+r;x+=2){ const v=a.g[y*a.W+x]; s+=v; s2+=v*v; n++; }
+  const m=s/n; return s2/n-m*m;
+}
+// best shift (u,v) of the block of `p` centred at (cx,cy) inside `c`, searching ±rng around (u0,v0); mean-removed SAD
+function vtMatch(p,c,cx,cy,r,rng,u0,v0,sub){
+  let pm=0,n=0; for(let y=cy-r;y<cy+r;y++) for(let x=cx-r;x<cx+r;x++){ pm+=p.g[y*p.W+x]; n++; } pm/=n;
+  let best=1e18,bu=u0,bv=v0; const E=sub?{}:null;
+  for(let v=v0-rng;v<=v0+rng;v++) for(let u=u0-rng;u<=u0+rng;u++){
+    if(cx+u-r<0||cy+v-r<0||cx+u+r>c.W||cy+v+r>c.H) continue;
+    let cm=0; for(let y=cy-r;y<cy+r;y+=2) for(let x=cx-r;x<cx+r;x+=2) cm+=c.g[(y+v)*c.W+x+u]; cm/=n/4;
+    let e=0;
+    for(let y=cy-r;y<cy+r;y++){ const po=y*p.W, co=(y+v)*c.W+u;
+      for(let x=cx-r;x<cx+r;x++) e+=Math.abs(p.g[po+x]-pm-c.g[co+x]+cm);
+      if(!sub && e>=best) break; }
+    if(E) E[u+","+v]=e;
+    if(e<best){ best=e; bu=u; bv=v; }
+  }
+  let fu=bu, fv=bv;
+  if(E){ // sub-pixel: fit a parabola through the neighbours of the best match
+    const q=(a,b,c0)=>{ const d=a-2*c0+b; return (a!=null&&b!=null&&d>0)? cl((a-b)/(2*d),-.5,.5) : 0; };
+    fu+=q(E[(bu-1)+","+bv],E[(bu+1)+","+bv],best); fv+=q(E[bu+","+(bv-1)],E[bu+","+(bv+1)],best);
+  }
+  return {u:fu,v:fv,err:best/n};
+}
+function vtStep(src,sw,sh){
+  const cur=vtGray(src,sw,sh), prev=VT.prev; VT.prev=cur;
+  if(!prev || prev.W!==cur.W || prev.H!==cur.H) return;
+  // pick the 3 most textured blocks on a 3x3 grid, track each, keep the median shift
+  const R=14, pts=[];
+  for(const fy of [.3,.5,.7]) for(const fx of [.3,.5,.7]){
+    const cx=Math.round(cur.W*fx), cy=Math.round(cur.H*fy);
+    if(cx-R-24<0||cx+R+24>cur.W||cy-R-24<0||cy+R+24>cur.H) continue;
+    pts.push({cx,cy,v:vtVar(prev,cx,cy,R)});
+  }
+  pts.sort((a,b)=>b.v-a.v);
+  const ph=vtHalf(prev), ch=vtHalf(cur), res=[];
+  for(const p of pts.slice(0,3)){
+    if(p.v<20) continue;                       // flat area (sky, wall): nothing to hold on to
+    const c1=vtMatch(ph,ch,p.cx>>1,p.cy>>1,R>>1,10,0,0);
+    const c2=vtMatch(prev,cur,p.cx,p.cy,R,2,c1.u*2,c1.v*2,true);
+    if(c2.err<22) res.push(c2);
+  }
+  if(!res.length){ VT.lost++; return; }
+  VT.lost=0;
+  const med=k=>{ const a=res.map(r=>r[k]).sort((x,y)=>x-y); return a[a.length>>1]; };
+  VT.dx+=med("u"); VT.dy+=med("v");
+}
+function vtReset(){ VT.dx=0; VT.dy=0; VT.lost=0; VT.prev=null; }
+
 /* ---------- Geometry ---------- */
 function layout(){
   const r=stage.getBoundingClientRect(), VW=r.width, VH=r.height, {w,h}=S.src;
@@ -578,10 +640,10 @@ function layout(){
   const s = S.fit==="cover" ? Math.max(VW/w,VH/h) : Math.min(VW/w,VH/h);
   return {s, ox:(VW-w*s)/2, oy:(VH-h*s)/2, VW, VH};
 }
-function trackOffset(){
-  if(S.mode!=="live" || !S.gyro) return {dx:0,dy:0};
-  const ppd=Math.max(S.src.w,S.src.h)/(S.set.fov/(S.camZoom||1)), k=S.set.invert?-1:1;
-  return {dx:S.track.yaw*ppd*k, dy:S.track.pitch*ppd*k};
+function trackOffset(){   // scene displacement since the analysis, in video pixels
+  if(S.mode!=="live") return {dx:0,dy:0};
+  const k=S.src.w/(VT.prev?VT.prev.W:128);
+  return {dx:VT.dx*k, dy:VT.dy*k};
 }
 function curFrame(){
   const f=S.frame; if(!f) return null;
@@ -800,7 +862,7 @@ async function analyze(){
   setMsg("A ler a cena…"); tipEl.textContent="";
   try{
     // composition features are taken at this exact moment; motion is measured from here
-    const F=features(el); S.track={yaw:0,pitch:0};
+    const F=features(el); S.track={yaw:0,pitch:0}; vtReset();
     let subj=null; S.hint=null; S.claudeTip="";
     const eng=engine();
     if(eng==="local"){
@@ -820,7 +882,7 @@ async function analyze(){
       }catch(e){ setMsg(errCopy(e)+" A usar só a composição.","err"); }
     }
     if(S.mode==="live") subj=shiftSubj(subj);
-    if(S.mode==="live"){ S.F=features(video); S.track={yaw:0,pitch:0}; } else S.F=F;
+    if(S.mode==="live"){ S.F=features(video); S.track={yaw:0,pitch:0}; vtReset(); } else S.F=F;
     S.subj=subj;
     S.comp=compose(S.F,subj,S.ratio);
     S.style=S.hint||autoStyle(S.comp);
@@ -838,7 +900,7 @@ async function tick(){
     let subj=shiftSubj(S.subj);
     if(engine()==="local" && detReady){ try{ const d=await detectLocal(video,subj); if(d) subj=d; }catch{} }
     const cur=curFrame();
-    const F=features(video); S.track={yaw:0,pitch:0};
+    const F=features(video); S.track={yaw:0,pitch:0}; vtReset();
     const C=compose(F,subj,S.ratio);
     S.F=F; S.comp=C; S.subj=subj;
     const nf=toSrc(C.best[S.style],F), a=.35;
@@ -1073,6 +1135,10 @@ function rr(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,
 function draw(){
   requestAnimationFrame(draw);
   if(S.mode==="live" && video.videoWidth) S.src={w:video.videoWidth,h:video.videoHeight};
+  if(S.mode==="live" && S.frame && !S.busy && $("#result").hidden && video.videoWidth){
+    const now=performance.now();
+    if(!VT.t || now-VT.t>30){ VT.t=now; try{ vtStep(video,video.videoWidth,video.videoHeight); }catch{} }
+  }
   const dpr=window.devicePixelRatio||1, L=layout();
   if(ov.width!==Math.round(L.VW*dpr)||ov.height!==Math.round(L.VH*dpr)){ ov.width=Math.round(L.VW*dpr); ov.height=Math.round(L.VH*dpr); }
   ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,L.VW,L.VH);
@@ -1088,7 +1154,6 @@ function draw(){
     let fx=L.ox+f.x*L.s, fy=L.oy+f.y*L.s, fw=f.w*L.s, fh=f.h*L.s;
     const dx=fx+fw/2-cx, dy=fy+fh/2-cy, dist=Math.hypot(dx,dy), tol=Math.min(L.VW,L.VH)*.06;
     if(S.mode==="photo") aligned=true;
-    else if(!S.gyro) aligned=true;                 // without a gyroscope we cannot guide: show the crop directly
     else aligned = S.zoom ? dist<tol*2.5 : dist<tol;
     // live: enter the crop preview after a short hold, leave it when the phone drifts away
     if(S.mode==="live" && !S.busy){
@@ -1125,7 +1190,8 @@ function draw(){
     const cz=S.mode==="live"?(S.camZoom||1):1;
     $("#rFocal").textContent=`≈ ${Math.round(26*z*cz)} mm · ${(z*cz).toFixed(1)}×`;
     if(S.mode==="live" && !S.busy){
-      if(S.zoom) setMsg(S.gyro?"Enquadrado. Carrega no botão.":"Sem giroscópio: este é o crop. Carrega no botão.","ok");
+      if(VT.lost>20) setMsg("Perdi a referência da cena. Carrega em Repetir IA.","err");
+      else if(S.zoom) setMsg("Enquadrado. Carrega no botão.","ok");
       else {
         const h = Math.abs(dx)>tol*.6 ? (dx<0?"para a esquerda":"para a direita") : "";
         const v = Math.abs(dy)>tol*.6 ? (dy<0?"para cima":"para baixo") : "";
@@ -1144,7 +1210,7 @@ function draw(){
     ctx.moveTo(-len,0); ctx.lineTo(-18,0); ctx.moveTo(18,0); ctx.lineTo(len,0); ctx.stroke(); ctx.restore();
     const lv=$("#rLevel"); lv.textContent=`nível ${S.roll>=0?"+":""}${S.roll.toFixed(1)}°`; lv.className=ok?"lv-ok":"";
   }
-  $("#rTrack").textContent = S.mode!=="live" ? "foto" : S.gyro ? "seguimento ativo" : "seguimento pela imagem";
+  $("#rTrack").textContent = S.mode!=="live" ? "foto" : (S.frame ? (VT.lost>20?"seguimento perdido":"seguimento pela imagem") : "pronto");
 
   if(aligned!==S.aligned){ S.aligned=aligned; }
   shutter.classList.toggle("ok",!!f&&aligned);
@@ -1216,13 +1282,10 @@ document.querySelectorAll(".ratios button").forEach(b=>b.onclick=()=>{
   S.ratio=+b.dataset.r; document.querySelectorAll(".ratios button").forEach(x=>x.setAttribute("aria-pressed",String(x===b)));
   if(S.F){ setZoom(false); S.comp=compose(S.F,S.subj,S.ratio); applyStyle(); }
 });
-const fov=$("#fov"), fovVal=$("#fovVal");
-$("#btnSet").onclick=()=>{ $("#apiKey").value=S.set.key; $("#tier").value=S.set.tier; fov.value=S.set.fov; fovVal.textContent=S.set.fov; $("#invert").checked=S.set.invert; renderEngine(); $("#settings").hidden=false; pushLayer("settings"); };
+$("#btnSet").onclick=()=>{ $("#apiKey").value=S.set.key; $("#tier").value=S.set.tier; renderEngine(); $("#settings").hidden=false; pushLayer("settings"); };
 $("#btnSetClose").onclick=stepBack;
 $("#apiKey").addEventListener("change",e=>{ S.set.key=e.target.value.trim(); store.set("key",S.set.key); renderEngine(); });
 $("#tier").addEventListener("change",e=>{ S.set.tier=e.target.value; store.set("tier",S.set.tier); });
-fov.addEventListener("input",()=>{ S.set.fov=+fov.value; fovVal.textContent=fov.value; store.set("fov",S.set.fov); });
-$("#invert").addEventListener("change",e=>{ S.set.invert=e.target.checked; store.set("invert",S.set.invert); });
 
 buildOpts(); renderEngine(); syncButtons(); initRuntime(); refreshThumb(); requestAnimationFrame(draw);
 })();
