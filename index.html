@@ -1007,7 +1007,8 @@ window.addEventListener("popstate",closeTop);
 /* ---------- Inside the Android app: native camera under the page ---------- */
 const NATIVE=!!(window.Native && typeof window.Native.info==="function");
 if(NATIVE){ document.documentElement.classList.add("native"); document.body.classList.add("native"); }
-const nvc=document.createElement("canvas"); let nvSeq=0, nvBusy=false;
+const nvc=document.createElement("canvas"); let nvSeq=0, nvBusy=false, camErr="";
+window.__camError=m=>{ camErr=String(m||"erro desconhecido"); };
 window.__nf=(url,z)=>{   // a small live frame from the native camera (~12 per second)
   if(nvBusy) return; nvBusy=true;
   const im=new Image();
@@ -1064,9 +1065,14 @@ async function startLive(deviceId){
   stopLive();
   if(NATIVE){
     setMsg("A abrir a câmara…","dim"); video.hidden=true; still.hidden=true; $("#nocam").hidden=true;
-    try{ Native.startCamera(); }catch{}
-    const t0=performance.now(); while(!nvSeq && performance.now()-t0<10000) await sleep(100);
-    if(!nvSeq){ showNoCam(); return false; }
+    camErr=""; try{ Native.startCamera(); }catch(e){ camErr=String(e); }
+    const t0=performance.now(); let hinted=false;
+    while(!nvSeq){   // the first time Android asks for permission: wait as long as it takes
+      if(camErr){ showNoCam(camErr); return false; }
+      if(!hinted && performance.now()-t0>2500){ hinted=true; setMsg("A abrir a câmara… se aparecer o pedido de permissão, aceita.","dim"); }
+      if(performance.now()-t0>90000){ showNoCam("a câmara não enviou imagem"); return false; }
+      await sleep(100);
+    }
     let ni={}; try{ ni=JSON.parse(Native.info()); }catch{}
     S.mode="live"; S.fit="cover"; S.phase="idle"; S.frame=null; S.src={w:nvc.width,h:nvc.height}; S.cams=[];
     S.zoomCaps = ni.maxZoom>ni.minZoom ? {min:ni.minZoom,max:ni.maxZoom} : null;
@@ -1098,10 +1104,11 @@ async function startLive(deviceId){
   ui(); return true;
 }
 function stopLive(){ if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; } video.hidden=true; video.style.transform=""; S.cssZoom=false; }
-function showNoCam(){
+function showNoCam(why){
   S.mode="idle"; S.phase="idle"; S.frame=null;
   const inClaude=!!window.claude;
-  $("#nocamWhy").textContent = inClaude
+  $("#nocamWhy").textContent = NATIVE ? "A câmara não arrancou ("+(why||"sem resposta")+"). Fecha a app e volta a abrir; se continuar, manda-me esta mensagem."
+    : inClaude
     ? "Dentro do Claude a câmara está bloqueada. Edita uma foto da galeria, ou abre a app pelo teu link https no Chrome."
     : (location.protocol==="https:"||location.hostname==="localhost")
       ? "Não consegui abrir a câmara. Confirma a permissão nas definições do site e tenta outra vez."
