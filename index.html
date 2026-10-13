@@ -31,6 +31,11 @@ svg{display:block}
 .eng{font:11px var(--f-mono);color:var(--muted);display:flex;align-items:center;gap:6px}
 .eng b{width:7px;height:7px;border-radius:50%;background:var(--muted)}
 .eng.ai b{background:var(--amber)}
+.eng{cursor:pointer;pointer-events:auto}
+.eng.up b{background:#34c759}
+.eng.down b{background:#ff453a}
+.eng.wait b{background:var(--amber);animation:engp 1s ease-in-out infinite}
+@keyframes engp{50%{opacity:.25}}
 
 #stage{position:relative;border-radius:20px;overflow:hidden;background:#0b0b0b;touch-action:none;min-height:0}
 #stage video,#stage img{position:absolute;inset:0;width:100%;height:100%;max-width:none}
@@ -55,7 +60,7 @@ svg{display:block}
 
 .hud{display:grid;gap:10px}
 .status{display:grid;gap:2px;text-align:center;min-height:40px;align-content:end}
-.msg{margin:0;font:500 13px var(--f-mono);color:var(--amber);text-wrap:balance}
+.msg{margin:0;font:500 13px var(--f-mono);color:var(--amber);text-wrap:balance;white-space:pre-line}
 .msg.ok{color:var(--lock)} .msg.err{color:var(--warn)} .msg.dim{color:var(--muted)}
 .sub{margin:0;font:11px var(--f-mono);color:var(--muted);min-height:15px;font-variant-numeric:tabular-nums}
 .lenses{display:flex;justify-content:center;gap:8px;min-height:34px}
@@ -128,7 +133,7 @@ svg{display:block}
 .field p{margin:0;font-size:13px;color:var(--muted)}
 .field a{color:var(--amber)}
 .warnbox{border:1px solid rgba(255,138,91,.35);background:rgba(255,138,91,.08);border-radius:10px;padding:10px 12px;font-size:13px;color:var(--fg)}
-.test-out{font:12px var(--f-mono);color:var(--muted);min-height:16px}
+.test-out{font:12px var(--f-mono);color:var(--muted);min-height:16px;white-space:pre-line}
 .test-out.ok{color:var(--lock)} .test-out.err{color:var(--warn)}
 </style>
 
@@ -232,7 +237,15 @@ svg{display:block}
       <select id="gmodel">
         <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite · rápido</option>
         <option value="gemini-3.8-flash">Gemini 3.8 Flash · escolhe melhor, mais lento</option>
+        <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
       </select>
+      <p>Se este modelo estiver em baixo, a app tenta sozinha os outros dois. O ponto ao lado de "gemini" no topo fica verde quando o Gemini responde e vermelho quando está em baixo; toca nele para verificar outra vez.</p>
+      <p class="test-out" id="healthOut"></p>
+    </div>
+    <div class="field">
+      <label style="display:flex;gap:10px;align-items:center"><input type="checkbox" id="neural"> IA local avançada</label>
+      <p>Usa dois modelos que correm no telemóvel: um vê para onde o olho vai (U²-Net) e outro dá nota estética aos enquadramentos (NIMA). Na primeira vez descarrega cerca de 17 MB.</p>
+      <p class="test-out" id="neuralOut"></p>
     </div>
     <div class="field">
       <button class="btn" id="btnTest">Testar ligação</button>
@@ -277,7 +290,7 @@ const S = {
   shot:null, shotZoom:1, shotDate:null, meta:null, liveMeta:null, photoMeta:null, cur:null,
   filter:"clean", border:"none", note:"",
   set:{ gkey:store.get("gkey",""), gmodel:store.get("gmodel","gemini-3.5-flash-lite"), fullres:store.get("fullres",true),
-        persona:store.get("persona","criativo"), extra:store.get("extra","") }
+        persona:store.get("persona","criativo"), extra:store.get("extra",""), neural:store.get("neural",true) }
 };
 
 /* ---------- Who picks the shot ---------- */
@@ -292,8 +305,12 @@ async function initRuntime(){
 function engine(){ return S.set.gkey ? "gemini" : sampleFn ? "claude" : "local"; }
 function renderEngine(){
   const e=engine();
-  $("#engTxt").textContent = e==="gemini" ? "gemini" : e==="claude" ? "claude" : "local";
-  $("#engChip").classList.toggle("ai", e!=="local");
+  const st=G.state, chipEl=$("#engChip");
+  $("#engTxt").textContent = e==="gemini" ? (st==="up"?"gemini":st==="down"?"gemini em baixo · local":st==="badkey"?"chave inválida · local":"gemini…") : e==="claude" ? "claude" : (S.set.neural?"local+":"local");
+  chipEl.classList.toggle("ai", e!=="local");
+  chipEl.classList.toggle("up", e==="gemini" && st==="up");
+  chipEl.classList.toggle("down", e==="gemini" && (st==="down"||st==="badkey"));
+  chipEl.classList.toggle("wait", e==="gemini" && (st==="checking"||st==="unknown"));
   $("#engineText").textContent =
     e==="gemini" ? "Gemini escolhe o motivo; a composição fina é calculada no telemóvel." :
     e==="claude" ? "Claude da tua conta escolhe o motivo (só aqui dentro do Claude)." :
@@ -325,7 +342,7 @@ const PROMPT = (w,h) => {
   return `You are a photo director helping someone take a striking phone photo. The image is the live camera view (${w>h?"landscape":"portrait"}, ${w}x${h}).
 ${persona().text}${S.set.extra?`\nThe photographer's own direction (follow it): ${S.set.extra.slice(0,400)}`:""}
 Pick ONE subject in it that would make the most beautiful photo when isolated with a moderate telephoto (about 2x zoom). Favour: light (sun, golden light, glowing windows, light through leaves), reflections, silhouettes, strong shapes, one isolated object, textures, leading lines that end in something. Avoid: things cut by the image edge, clutter, plain empty sky. Never pick a lamp, street light or light bulb as the subject; choose what the light falls on, its glow on a surface, or its reflection, and keep bright lamps away from the edges of the shot. The sun at sunset is fine.
-Then propose the shot: a rectangle with width:height = ${S.ratio.toFixed(3)} that contains the subject, places it with a composition rule, and covers roughly ${persona().cover} of the image width.
+Then propose the shot: a rectangle with width:height = ${S.ratio.toFixed(3)} that contains the subject, places it with a composition rule, and covers roughly ${persona().cover} of the image width. Leave space in front of people or animals in the direction they look or move.
 Finally choose the look of the finished photo to match the mood of that shot (do not default to the same every time):
 filter, one of: clean (natural), vivo (punchy colour), quente (warm), claro (bright and airy), suave (soft, faded), pelicula (film with grain), dourado (golden glow), cinema (teal and orange, vignette), porto (crisp, clean contrast), dusk (warm evening), relic (vintage), lofi (high contrast, saturated), pb (black and white), noir (dramatic black and white).
 border, one of: none, white (thin white), ficha (white with camera specs), polaroid (instant photo with handwritten caption), galeria (museum mat), pelicula (film frame), desfocado (blurred square backdrop), paper (cream paper with caption), date (orange date stamp).${avoid}
@@ -341,30 +358,66 @@ function parseJSON(t){
   try{ return JSON.parse(t.slice(a,b+1)); }catch{ throw {code:"bad_json"}; }
 }
 const G_TIMEOUT=12000;            // a busy Gemini can hang instead of failing; give up after this
-const G_PAUSE=120000;             // after a timeout/overload, skip Gemini for this long and go local straight away
-let gPausedUntil=0;
-function geminiPaused(){ return Date.now()<gPausedUntil; }
-async function askGemini(b64, prompt){
+const G_PAUSE=120000;             // after a timeout/overload, skip that model for this long
+const G_MODELS=["gemini-3.5-flash-lite","gemini-3.8-flash","gemini-3.6-flash"];
+const gPaused={};                 // model -> skip until (ms)
+const G={state:"unknown", model:"", why:""};   // health: unknown | checking | up | down | badkey | nokey
+function geminiPaused(m){ return Date.now()<(gPaused[m]||0); }
+function fatalKey(e){ const c=(e&&e.code)||"", m=((e&&e.msg)||"").toLowerCase(); return c==="g_401"||c==="g_403"||(c==="g_400"&&(m.includes("api key")||m.includes("api_key"))); }
+/** Models to try, the one known to work first, then the chosen one, then the rest. */
+function modelOrder(){
+  const first = G.state==="up" && G.model ? G.model : S.set.gmodel;
+  return [first, S.set.gmodel, ...G_MODELS].filter((m,i,a)=>m && a.indexOf(m)===i);
+}
+async function askGemini(b64, prompt, model, timeout){
+  model=model||S.set.gmodel; timeout=timeout||G_TIMEOUT;
   let r, j;
-  const ac=new AbortController(), timer=setTimeout(()=>ac.abort(),G_TIMEOUT);
+  const ac=new AbortController(), timer=setTimeout(()=>ac.abort(),timeout);
   try{
     try{
-      r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(S.set.gmodel)}:generateContent`,{
+      r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{
         method:"POST", headers:{"content-type":"application/json","x-goog-api-key":S.set.gkey}, signal:ac.signal,
         body:JSON.stringify({contents:[{role:"user",parts:[{text:prompt},...(b64?[{inline_data:{mime_type:"image/jpeg",data:b64}}]:[])]}],
           generationConfig:{responseMimeType:"application/json",temperature:persona().temp}})
       });
-    }catch{ if(ac.signal.aborted){ gPausedUntil=Date.now()+G_PAUSE; throw {code:"g_timeout"}; } throw {code:"g_net"}; }
+    }catch{ if(ac.signal.aborted){ gPaused[model]=Date.now()+G_PAUSE; throw {code:"g_timeout"}; } throw {code:"g_net"}; }
     if(!r.ok){
-      if(r.status===429||r.status>=500) gPausedUntil=Date.now()+G_PAUSE;
+      if(r.status===429||r.status>=500) gPaused[model]=Date.now()+G_PAUSE;
       let m=""; try{ m=((await r.json()).error||{}).message||""; }catch{} throw {code:"g_"+r.status, msg:m};
     }
-    try{ j=await r.json(); }catch{ if(ac.signal.aborted){ gPausedUntil=Date.now()+G_PAUSE; throw {code:"g_timeout"}; } throw {code:"g_empty"}; }
+    try{ j=await r.json(); }catch{ if(ac.signal.aborted){ gPaused[model]=Date.now()+G_PAUSE; throw {code:"g_timeout"}; } throw {code:"g_empty"}; }
   }finally{ clearTimeout(timer); }
   const t=((j.candidates&&j.candidates[0]&&j.candidates[0].content&&j.candidates[0].content.parts)||[]).map(p=>p.text||"").join("");
   if(!t) throw {code:"g_empty"};
   return t;
 }
+function setHealth(state, model, why){
+  G.state=state; G.model=model||""; if(why!=null) G.why=why;
+  renderEngine();
+  const o=$("#healthOut"); if(o){
+    o.className="test-out"+(state==="up"?" ok":state==="down"||state==="badkey"?" err":"");
+    o.textContent = state==="up" ? "A responder: "+G.model+"." : state==="checking" ? "A verificar o Gemini…" : G.why ? G.why : "";
+  }
+}
+/** A tiny request to each model in turn, 8 s each: the ✦ button never waits for a dead service. */
+let gChecking=false;
+async function checkGemini(){
+  if(!S.set.gkey){ setHealth("nokey","",""); return; }
+  if(gChecking) return; gChecking=true;
+  if(G.state!=="up") setHealth("checking", G.model);
+  const why=[]; let ok="", bad=false;
+  for(const m of modelOrder()){
+    const t0=performance.now();
+    try{ parseJSON(await askGemini(null,'Answer with JSON only: {"ok":true}',m,8000)); ok=m; break; }
+    catch(e){ why.push(m+": "+errCopy(e)+" ("+((performance.now()-t0)/1000).toFixed(1)+" s)"); if(fatalKey(e)){ bad=true; break; } }
+  }
+  gChecking=false;
+  if(ok){ for(const k in gPaused) delete gPaused[k]; setHealth("up", ok, ""); }
+  else setHealth(bad?"badkey":"down", "", why.join("\n"));
+}
+setInterval(()=>{ if(document.visibilityState==="visible") checkGemini(); }, 120000);
+document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible" && G.state!=="up") checkGemini(); });
+
 async function askClaude(blob, prompt){ return await sampleFn.json(prompt,{images:[blob], modelTier:"quick"}); }
 function fromAI(res){
   const b=res && (res.subject_box||res.box_2d||res.box);
@@ -446,6 +499,67 @@ function pickSubject(dets,prev){
 }
 
 
+/* ---------- Advanced local AI: U²-Net (where the eye goes) + NIMA (aesthetic score), on the phone ---------- */
+const ORT="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
+let ortP=null; const sessP={};
+function loadOrt(){
+  if(!ortP) ortP=import(ORT+"ort.webgpu.min.mjs").then(o=>{ o.env.wasm.wasmPaths=ORT; return o; }).catch(e=>{ ortP=null; throw e; });
+  return ortP;
+}
+function loadModel(file){   // the .onnx files sit next to index.html
+  if(!sessP[file]) sessP[file]=(async()=>{
+    const ort=await loadOrt();
+    try{ return await ort.InferenceSession.create(file,{executionProviders:["webgpu","wasm"]}); }
+    catch{ return await ort.InferenceSession.create(file,{executionProviders:["wasm"]}); }
+  })().catch(e=>{ delete sessP[file]; throw e; });
+  return sessP[file];
+}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const within=(p,ms)=>Promise.race([p, sleep(ms).then(()=>null)]);
+const nnCan=document.createElement("canvas");
+/** Saliency map from U²-Net (u2netp), resampled to W×H, values 0..1. */
+async function neuralSal(src,W,H){
+  const s=await loadModel("u2netp.onnx"), ort=await loadOrt(), N=320;
+  nnCan.width=N; nnCan.height=N;
+  const x=nnCan.getContext("2d",{willReadFrequently:true}); x.imageSmoothingEnabled=true; x.drawImage(src,0,0,N,N);
+  const d=x.getImageData(0,0,N,N).data; let mx=1;
+  for(let i=0;i<d.length;i+=4){ if(d[i]>mx)mx=d[i]; if(d[i+1]>mx)mx=d[i+1]; if(d[i+2]>mx)mx=d[i+2]; }
+  const mean=[.485,.456,.406], sd=[.229,.224,.225], inp=new Float32Array(3*N*N);
+  for(let p=0,j=0;p<N*N;p++,j+=4) for(let c=0;c<3;c++) inp[c*N*N+p]=(d[j+c]/mx-mean[c])/sd[c];
+  const r=await s.run({[s.inputNames[0]]:new ort.Tensor("float32",inp,[1,3,N,N])});
+  const o=r[s.outputNames[0]].data; let lo=1e9,hi=-1e9;
+  for(let i=0;i<o.length;i++){ if(o[i]<lo)lo=o[i]; if(o[i]>hi)hi=o[i]; }
+  const out=new Float32Array(W*H), k=1/Math.max(1e-6,hi-lo);
+  for(let y=0;y<H;y++){ const sy=Math.min(N-1,Math.floor((y+.5)/H*N));
+    for(let xx=0;xx<W;xx++){ const sx=Math.min(N-1,Math.floor((xx+.5)/W*N)); out[y*W+xx]=(o[sy*N+sx]-lo)*k; } }
+  return out;
+}
+/** NIMA aesthetic score (1..10) of a region of `src` given in src pixels. */
+async function nimaScore(src,sx,sy,sw,sh){
+  const s=await loadModel("nima.onnx"), ort=await loadOrt(), N=224;
+  nnCan.width=N; nnCan.height=N;
+  const x=nnCan.getContext("2d",{willReadFrequently:true}); x.imageSmoothingEnabled=false;   // the model was trained on nearest-neighbour resizes
+  x.drawImage(src,sx,sy,sw,sh,0,0,N,N);
+  const d=x.getImageData(0,0,N,N).data, inp=new Float32Array(3*N*N);
+  for(let p=0,j=0;p<N*N;p++,j+=4) for(let c=0;c<3;c++) inp[c*N*N+p]=d[j+c]/127.5-1;
+  const r=await s.run({[s.inputNames[0]]:new ort.Tensor("float32",inp,[1,3,N,N])});
+  const o=r[s.outputNames[0]].data; let m=0; for(let i=0;i<10;i++) m+=o[i]*(i+1);
+  return m;
+}
+const NIMA_STYLES=["tercos","aurea","centro","simetrico","minimal","diagonal"];
+/** Local engine: the best crop of each rule, then NIMA picks the most beautiful one. */
+async function nimaPick(F,snap,subj){
+  const kx=snap.width/F.W, ky=snap.height/F.H, cands=[];
+  for(const st of NIMA_STYLES){
+    const c=bestCrop(F,subj,S.ratio,st,{scales:[.42,.5,.58]}); if(!c) continue;
+    if(cands.some(o=>Math.abs(o.c.x0-c.x0)<2&&Math.abs(o.c.y0-c.y0)<2&&Math.abs(o.c.cw-c.cw)<2)) continue;
+    cands.push({c,st});
+  }
+  let best=null;
+  for(const o of cands){ o.n=await nimaScore(snap,o.c.x0*kx,o.c.y0*ky,o.c.cw*kx,o.c.ch*ky); if(!best||o.n>best.n) best=o; }
+  return best;
+}
+
 /* ---------- Composition engine: scores hundreds of crops on the image itself ---------- */
 const fcan=document.createElement("canvas");
 function boxBlur(a,W,H,r){
@@ -464,7 +578,7 @@ function integ(arr,W,H){
 }
 const rs=(I,W,x0,y0,x1,y1)=>{ const w=W+1; return I[y1*w+x1]-I[y0*w+x1]-I[y1*w+x0]+I[y0*w+x0]; };
 
-function features(el){
+function features(el,NS){
   const SW=S.src.w, SH=S.src.h, k=160/Math.max(SW,SH);
   const W=Math.max(16,Math.round(SW*k)), H=Math.max(16,Math.round(SH*k)), n=W*H;
   fcan.width=W; fcan.height=H;
@@ -501,7 +615,7 @@ function features(el){
   const SX=new Float32Array(n), SY=new Float32Array(n); let salTot=0, eTot=0;
   for(let y=0;y<H;y++) for(let x=0;x<W;x++){ const i=y*W+x;
     const dx=(x+.5)/W-.5, dy=(y+.5)/H-.5, prior=.5+.5*Math.exp(-(dx*dx+dy*dy)/(2*.3*.3));
-    const v=((sal[i]/sMax)**2)*prior*(1-.85*Math.min(1,HotB[i]*3)); sal[i]=v; SX[i]=v*(x+.5); SY[i]=v*(y+.5); salTot+=v; eTot+=E[i]; }
+    const base=(sal[i]/sMax)**2, v=(NS?(.3*base+.7*NS[i]):base)*prior*(1-.85*Math.min(1,HotB[i]*3)); sal[i]=v; SX[i]=v*(x+.5); SY[i]=v*(y+.5); salTot+=v; eTot+=E[i]; }
   // horizon: the strongest long horizontal edge
   let hy=null; { let best=0,mean=0,cnt=0;
     for(let y=Math.round(H*.08);y<Math.round(H*.92);y++){ const v=(Hz[y-1]+Hz[y]+Hz[y+1])/3; mean+=v; cnt++; if(v>best){best=v;hy=y;} }
@@ -853,27 +967,45 @@ async function findShot(){
   S.busy=true; S.phase="scan"; S.frame=null; S.note=""; S.plan=null; $("#scan").hidden=false; ui();
   setMsg("A procurar a foto…");
   try{
-    const F=features(el); vtReset();            // the scene is measured at this moment; movement is tracked from here
-    const eng=engine(); let plan=null;
-    if(eng==="gemini" && geminiPaused()) S.note=errCopy({code:"g_paused"})+" Usei o motor local.";
-    else if(eng!=="local"){
-      try{
-        const {w,h}=S.src, k=Math.min(1,1024/Math.max(w,h));
-        const c=document.createElement("canvas"); c.width=Math.round(w*k); c.height=Math.round(h*k);
-        c.getContext("2d").drawImage(el,0,0,c.width,c.height);
-        const prompt=PROMPT(c.width,c.height);
-        if(eng==="gemini") plan=fromAI(parseJSON(await askGemini(c.toDataURL("image/jpeg",.85).split(",")[1], prompt)));
-        else { const blob=await new Promise(r=>c.toBlob(r,"image/jpeg",.85)); plan=fromAI(parseJSON(await askClaude(blob,prompt))); }
-      }catch(e){ S.note=errCopy(e)+" Usei o motor local."; }
+    // the scene is measured at this moment; movement is tracked from here
+    const {w,h}=S.src, k=Math.min(1,1024/Math.max(w,h));
+    const snap=document.createElement("canvas"); snap.width=Math.round(w*k); snap.height=Math.round(h*k);
+    snap.getContext("2d").drawImage(el,0,0,snap.width,snap.height); vtReset();
+    const FW=Math.max(16,Math.round(w*160/Math.max(w,h))), FH=Math.max(16,Math.round(h*160/Math.max(w,h)));
+    const nsP = S.set.neural ? neuralSal(snap,FW,FH).catch(()=>null) : Promise.resolve(null);
+    const t0=performance.now();
+    const eng=engine(); let plan=null, who="";
+    if(eng==="gemini"){
+      if(G.state==="down"||G.state==="badkey") S.note=(G.state==="down"?"Gemini em baixo.":"Chave do Gemini inválida.")+" Usei o motor local.";
+      else {
+        const b64=snap.toDataURL("image/jpeg",.85).split(",")[1], prompt=PROMPT(snap.width,snap.height); let last=null;
+        for(const m of modelOrder()){
+          if(geminiPaused(m)){ last={code:"g_paused"}; continue; }
+          try{ plan=fromAI(parseJSON(await askGemini(b64,prompt,m))); who=m.replace("gemini-",""); if(G.state!=="up"||G.model!==m) setHealth("up",m,""); break; }
+          catch(e){ last=e; if(fatalKey(e)){ setHealth("badkey","",errCopy(e)); break; } }
+        }
+        if(!plan){ if(G.state!=="badkey") setHealth("down","",errCopy(last)); S.note=errCopy(last)+" Usei o motor local."; }
+      }
+    } else if(eng==="claude"){
+      try{ const blob=await new Promise(r=>snap.toBlob(r,"image/jpeg",.85)); plan=fromAI(parseJSON(await askClaude(blob,PROMPT(snap.width,snap.height)))); who="claude"; }
+      catch(e){ S.note=errCopy(e)+" Usei o motor local."; }
     }
+    if(!plan || S.set.neural) setMsg(plan ? "A afinar o enquadramento…" : S.set.neural ? "A IA local está a ver a cena…" : "A procurar a foto…");
+    const NS = await within(nsP, plan ? 2500 : 8000);   // first use downloads the models
+    const F=features(snap,NS);
+    let pick=null;
     if(!plan){
       if(!detReady) setMsg("A preparar o detetor (só na primeira vez)…");
       let subj=null; try{ subj=await detectLocal(el,null); }catch{}
       plan={subj, shot:null, rule:"tercos", tip:""};
+      if(S.set.neural){ try{ pick=await within(nimaPick(F,snap,subj),6000); }catch{} if(pick) plan.rule=pick.st; }
+      who = pick ? "local+ · nota "+pick.n.toFixed(1) : NS ? "local+" : "local";
     }
+    const dt=((performance.now()-t0)/1000).toFixed(1);
+    S.note=(S.note?S.note+"  ":"")+who+" · "+dt+" s";
     if(S.phase!=="scan") return;               // cancelled meanwhile
     S.F=F; S.plan=plan; S.subj=plan.subj; S.style=plan.rule; S.tip=plan.tip||LOCAL_TIP[plan.rule];
-    const c=planCrop(F,plan); S.frame=toFrame(c,F);
+    const c=(pick&&pick.c)||planCrop(F,plan); S.frame=toFrame(c,F);
     S.seen.push(plan.subj?plan.subj.name:"zona "+Math.round(S.frame.x)+","+Math.round(S.frame.y));
     S.phase = S.mode==="live" ? "guide" : "locked";
     if(S.mode==="photo") setMsg(S.tip,"ok");
@@ -1426,15 +1558,23 @@ $("#btnCopyLink").onclick=async()=>{
 $("#persona").addEventListener("change",e=>{ S.set.persona=e.target.value; store.set("persona",S.set.persona); });
 $("#extra").addEventListener("change",e=>{ S.set.extra=e.target.value.trim(); store.set("extra",S.set.extra); });
 $("#fullres").addEventListener("change",e=>{ S.set.fullres=e.target.checked; store.set("fullres",S.set.fullres); });
-$("#btnSet").onclick=()=>{ $("#gkey").value=S.set.gkey; $("#gmodel").value=S.set.gmodel; $("#testOut").textContent=""; $("#shareLink").value=testerLink(); $("#copyOut").textContent=""; $("#fullres").checked=S.set.fullres; $("#persona").value=S.set.persona; $("#extra").value=S.set.extra; renderEngine(); $("#settings").hidden=false; pushLayer("settings"); };
+$("#btnSet").onclick=()=>{ $("#gkey").value=S.set.gkey; $("#gmodel").value=S.set.gmodel; $("#testOut").textContent=""; $("#shareLink").value=testerLink(); $("#copyOut").textContent=""; $("#fullres").checked=S.set.fullres; $("#persona").value=S.set.persona; $("#extra").value=S.set.extra; $("#neural").checked=S.set.neural; renderEngine(); setHealth(G.state,G.model,null); $("#settings").hidden=false; pushLayer("settings"); };
 $("#btnSetClose").onclick=stepBack;
-$("#gkey").addEventListener("change",e=>{ S.set.gkey=e.target.value.trim(); store.set("gkey",S.set.gkey); renderEngine(); });
+$("#gkey").addEventListener("change",e=>{ S.set.gkey=e.target.value.trim(); store.set("gkey",S.set.gkey); renderEngine(); checkGemini(); });
+$("#engChip").onclick=()=>{ if(S.set.gkey){ setMsg(G.why && G.state!=="up" ? "Último erro:\n"+G.why+"\nA verificar outra vez…" : "A verificar o Gemini…"); checkGemini().then(()=>{ if(G.state==="up") setMsg("Gemini a responder ("+G.model+")."); else if(G.why) setMsg("Gemini indisponível:\n"+G.why,"err"); }); } };
+$("#neural").addEventListener("change",async e=>{
+  S.set.neural=e.target.checked; store.set("neural",S.set.neural); renderEngine();
+  const o=$("#neuralOut"); if(!S.set.neural){ o.textContent=""; return; }
+  o.className="test-out"; o.textContent="A descarregar os modelos…";
+  try{ await loadModel("u2netp.onnx"); await loadModel("nima.onnx"); o.className="test-out ok"; o.textContent="Modelos prontos."; }
+  catch(err){ o.className="test-out err"; o.textContent="Não consegui carregar os modelos: confirma que u2netp.onnx e nima.onnx estão no repositório, ao lado do index.html."; }
+});
 $("#gmodel").addEventListener("change",e=>{ S.set.gmodel=e.target.value; store.set("gmodel",S.set.gmodel); });
 $("#btnTest").onclick=async()=>{
   const o=$("#testOut"); S.set.gkey=$("#gkey").value.trim(); store.set("gkey",S.set.gkey); renderEngine();
   if(!S.set.gkey){ o.className="test-out err"; o.textContent="Cola primeiro a chave."; return; }
   o.className="test-out"; o.textContent="A testar…";
-  try{ const t=await askGemini(null,'Answer with JSON only: {"ok":true}'); parseJSON(t); o.className="test-out ok"; o.textContent="Ligação OK com "+S.set.gmodel+"."; }
+  try{ const t=await askGemini(null,'Answer with JSON only: {"ok":true}',S.set.gmodel,8000); parseJSON(t); o.className="test-out ok"; o.textContent="Ligação OK com "+S.set.gmodel+"."; checkGemini(); }
   catch(e){ o.className="test-out err"; o.textContent=errCopy(e)+(e&&e.msg?" ("+e.msg.slice(0,90)+")":""); }
 };
 
@@ -1445,6 +1585,8 @@ $("#btnTest").onclick=async()=>{
   try{ history.replaceState(null,"",location.pathname+location.search); }catch{}
 })();
 renderEngine(); ui(); initRuntime(); refreshThumb(); requestAnimationFrame(draw);
+checkGemini();
+setTimeout(()=>{ if(S.set.neural){ loadModel("u2netp.onnx").catch(()=>{}); loadModel("nima.onnx").catch(()=>{}); } }, 4000);   // get the local models ready in the background
 startLive();
 })();
 </script>
