@@ -707,7 +707,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         lastMatch = "$lastMatch · sensor ${cam.lensNow()}"
         setMsg("A afinar a composição…", "ok"); ui()
         val token = lockAt
-        pv.postDelayed({ if (phase == "locked" && lockAt == token) lifecycleScope.launch { refineShot(token) } }, 250)
+        pv.postDelayed({ if (phase == "locked" && lockAt == token) lifecycleScope.launch {
+            val ok = try { kotlinx.coroutines.withTimeoutOrNull(12000) { refineShot(token); true } } catch (e: Throwable) { android.util.Log.e("Enquadra", "refine", e); null }
+            android.util.Log.i("Enquadra", "refine done ok=$ok refined=$refined")
+            if (ok == null && phase == "locked" && lockAt == token) setMsg(tip.ifEmpty { "Pronto. Tira a foto." }, "ok")
+        } }, 250)
     }
 
     // ---------- final touch: Gemini looks at the zoomed shot and adjusts the crop itself ----------
@@ -715,7 +719,9 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private suspend fun refineShot(token: Long) {
         val sw = cam.srcW.toDouble(); val sh = cam.srcH.toDouble()
         val full = frame ?: return
+        android.util.Log.i("Enquadra", "refine: snapshot")
         val snap = snapshot(1024) ?: run { setMsg(tip.ifEmpty { "Enquadrado. Tira a foto." }, "ok"); return }
+        android.util.Log.i("Enquadra", "refine: snapshot ${snap.width}x${snap.height}")
         var box: RectD? = null; var t2 = ""
         if (gem.engine() == "gemini" && gem.state == "up") {
             try {
@@ -739,6 +745,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 bestCrop(F, null, ratio, style, CropOpt(listOf(.86, .93, 1.0), fw / 2.0, fh / 2.0, .05))?.let { toFrame(it, F, sw, sh, ratio) }
             }
         }
+        android.util.Log.i("Enquadra", "refine: box=$box phase=$phase")
         if (phase != "locked" || lockAt != token) return
         val b = box
         if (b != null) {
