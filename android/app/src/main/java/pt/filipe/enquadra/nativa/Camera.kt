@@ -276,7 +276,7 @@ class Cam(private val ctx: Context) {
     }
 
     // ---- photo ----
-    class Photo(val bmp: Bitmap, val fullW: Int, val fullH: Int, val ms: Long)
+    class Photo(val bmp: Bitmap, val fullW: Int, val fullH: Int, val ms: Long, val exif: String = "")
 
     /** Takes a full-resolution photo and cuts out the frame (r in source coordinates, sw x sh). */
     fun takePhoto(r: RectD, sw: Int, sh: Int, cb: (Photo?, String) -> Unit) {
@@ -308,7 +308,13 @@ class Cam(private val ctx: Context) {
                     val part = dec.decodeRegion(Rect(rx0, ry0, rx1, ry1), BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 })
                     dec.recycle()
                     val out = if (rot != 0) Bitmap.createBitmap(part, 0, 0, part.width, part.height, Matrix().apply { postRotate(rot.toFloat()) }, true).also { if (it !== part) part.recycle() } else part
-                    res = Photo(out, if (rot % 180 == 0) jw else jh, if (rot % 180 == 0) jh else jw, System.currentTimeMillis() - t0)
+                    // exposure, for the "Ficha técnica" border
+                    val ex = try { android.media.ExifInterface(java.io.ByteArrayInputStream(bytes)) } catch (e: Exception) { null }
+                    val parts = ArrayList<String>()
+                    ex?.getAttributeDouble(android.media.ExifInterface.TAG_F_NUMBER, 0.0)?.takeIf { it > 0 }?.let { parts.add("f/" + "%.1f".format(java.util.Locale.US, it).removeSuffix(".0")) }
+                    ex?.getAttributeDouble(android.media.ExifInterface.TAG_EXPOSURE_TIME, 0.0)?.takeIf { it > 0 }?.let { parts.add(if (it >= 1) "%.1fs".format(java.util.Locale.US, it) else "1/${(1 / it).roundToInt()}s") }
+                    ex?.getAttributeInt(android.media.ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY, 0)?.takeIf { it > 0 }?.let { parts.add("ISO $it") }
+                    res = Photo(out, if (rot % 180 == 0) jw else jh, if (rot % 180 == 0) jh else jw, System.currentTimeMillis() - t0, parts.joinToString("  "))
                 } catch (e: Throwable) { why = e.message ?: e.toString() } finally { image.close() }
                 val rr = res; val w = why; main.post { cb(rr, w) }
             }

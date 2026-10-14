@@ -23,11 +23,12 @@ object C {
 }
 
 object F {
-    lateinit var ui: Typeface; lateinit var uiMed: Typeface; lateinit var uiSemi: Typeface; lateinit var mono: Typeface; lateinit var monoMed: Typeface
+    lateinit var ui: Typeface; lateinit var uiMed: Typeface; lateinit var uiSemi: Typeface; lateinit var mono: Typeface; lateinit var monoMed: Typeface; lateinit var hand: Typeface
     fun load(c: Context) {
         fun f(id: Int, fb: Typeface) = try { ResourcesCompat.getFont(c, id) ?: fb } catch (e: Exception) { fb }
         ui = f(R.font.grotesk_regular, Typeface.SANS_SERIF); uiMed = f(R.font.grotesk_medium, Typeface.SANS_SERIF)
         uiSemi = f(R.font.grotesk_semibold, Typeface.DEFAULT_BOLD); mono = f(R.font.mono_regular, Typeface.MONOSPACE); monoMed = f(R.font.mono_medium, Typeface.MONOSPACE)
+        hand = f(R.font.hand_medium, Typeface.create("cursive", Typeface.NORMAL))
     }
 }
 
@@ -121,5 +122,34 @@ class Choice(ctx: Context, items: List<Pair<String, String>>, sel: String, val o
         for ((k, t) in rows) { val on = k == id
             t.background = bg(C.PANEL, context.dp(10), if (on) C.AMBER else C.LINE, context.dpi(if (on) 1.5 else 1))
             t.setTextColor(if (on) C.FG else C.MUTED) }
+    }
+}
+
+
+/** The small border previews of the web version (.bi-*): a swatch with the photo area inside. */
+class BorderIcon(ctx: Context, val kind: String) : View(ctx) {
+    var on = false; set(v) { field = v; invalidate() }
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    override fun onDraw(cv: Canvas) {
+        val d = context.dp(1); val w = width.toFloat(); val h = height.toFloat(); val r = 6 * d
+        val bgc = when (kind) { "white", "ficha" -> Color.WHITE; "polaroid" -> 0xFFFBFAF7.toInt(); "galeria" -> 0xFFF3F1EC.toInt(); "pelicula" -> 0xFF0C0C0B.toInt(); "paper" -> 0xFFF1ECE2.toInt(); else -> 0xFF333333.toInt() }
+        p.style = Paint.Style.FILL; p.shader = null
+        if (kind == "desfocado") p.shader = LinearGradient(0f, 0f, w, h, 0xFF555555.toInt(), 0xFF999999.toInt(), Shader.TileMode.CLAMP) else p.color = bgc
+        cv.drawRoundRect(0f, 0f, w, h, r, r, p); p.shader = null
+        p.color = 0xFF777777.toInt()
+        val b = 2 * d
+        when (kind) {
+            "none", "date" -> cv.drawRoundRect(b, b, w - b, h - b, r - b, r - b, p)
+            "white" -> cv.drawRect(3 * d + b, 3 * d + b, w - 3 * d - b, h - 3 * d - b, p)
+            "ficha" -> cv.drawRect(3 * d + b, 3 * d + b, w - 3 * d - b, h - 9 * d - b, p)
+            "polaroid" -> cv.drawRect(3 * d + b, 3 * d + b, w - 3 * d - b, h - 10 * d - b, p)
+            "galeria" -> cv.drawRect(7 * d + b, 7 * d + b, w - 7 * d - b, h - 10 * d - b, p)
+            "pelicula" -> cv.drawRect(2 * d + b, 5 * d + b, w - 2 * d - b, h - 5 * d - b, p)
+            "desfocado" -> { p.setShadowLayer(4 * d, 0f, 2 * d, Color.BLACK); cv.drawRect(6 * d + b, 6 * d + b, w - 6 * d - b, h - 6 * d - b, p); p.clearShadowLayer() }
+            "paper" -> cv.drawRect(3 * d + b, 3 * d + b, w - 3 * d - b, h - 8 * d - b, p)
+        }
+        if (kind == "date") { p.color = 0xFFFF9A3C.toInt(); cv.drawRoundRect(w - 3 * d - b - 9 * d, h - 3 * d - b - 4 * d, w - 3 * d - b, h - 3 * d - b, d, d, p) }
+        p.style = Paint.Style.STROKE; p.strokeWidth = 2 * d; p.color = if (on) C.AMBER else C.LINE
+        cv.drawRoundRect(d, d, w - d, h - d, r, r, p)
     }
 }

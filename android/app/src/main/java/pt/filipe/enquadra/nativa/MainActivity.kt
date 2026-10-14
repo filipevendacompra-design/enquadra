@@ -74,6 +74,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private lateinit var stage: FrameLayout
     private lateinit var pv: PreviewView
     private lateinit var freeze: ImageView
+    private lateinit var stillView: ImageView
     private lateinit var ov: Overlay
     private lateinit var nocam: LinearLayout
     private lateinit var msgEl: TextView
@@ -112,7 +113,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         window.statusBarColor = Color.BLACK; window.navigationBarColor = Color.BLACK
         buildUi()
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) { override fun handleOnBackPressed() { stepBack() } })
-        renderEngine(); ui(); refreshThumb()
+        renderEngine(); ui(); refreshThumb(); installDrag()
         if (!(gem.state == "quota" && System.currentTimeMillis() < gem.until)) lifecycleScope.launch { gem.check() }
         setMsg("A abrir a câmara…", "dim")
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) pv.post { startCamera() }
@@ -176,7 +177,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         freeze = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_XY; pivotX = 0f; pivotY = 0f; visibility = View.GONE }
         ov = Overlay(this)
         nocam = buildNoCam()
-        stage.addView(pv, FrameLayout.LayoutParams(-1, -1)); stage.addView(freeze, FrameLayout.LayoutParams(-1, -1))
+        stillView = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER; visibility = View.GONE }
+        stage.addView(pv, FrameLayout.LayoutParams(-1, -1)); stage.addView(stillView, FrameLayout.LayoutParams(-1, -1)); stage.addView(freeze, FrameLayout.LayoutParams(-1, -1))
         stage.addView(ov, FrameLayout.LayoutParams(-1, -1)); stage.addView(nocam, FrameLayout.LayoutParams(-1, -1))
 
         // status, lenses, controls
@@ -189,7 +191,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         val controls = FrameLayout(this)
         thumb = FrameLayout(this).apply { background = bg(C.PANEL, dp(12)); clipToOutline = true
             outlineProvider = object : ViewOutlineProvider() { override fun getOutline(v: View, o: Outline) { o.setRoundRect(0, 0, v.width, v.height, dp(12)) } }
-            setOnClickListener { openLastPhoto() }; contentDescription = "Galeria" }
+            setOnClickListener { openGallery() }; contentDescription = "Galeria" }
         thumbImg = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; visibility = View.GONE }
         thumbIco = Icon(this, "gallery")
         thumb.addView(thumbIco, FrameLayout.LayoutParams(-1, -1)); thumb.addView(thumbImg, FrameLayout.LayoutParams(-1, -1))
@@ -251,7 +253,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             fun wait() {
                 if (cam.srcW > 0) {
                     mode = "live"; phase = "idle"; frame = null
-                    homeZoom = cam.minZoom; cam.setZoom(homeZoom)   // like Framed: start on the widest lens, the AI sees more
+                    homeZoom = 1f.coerceIn(cam.minZoom, cam.maxZoom); cam.setZoom(homeZoom)
                     setMsg("Aponta e toca em ✦ para encontrar a foto.", "dim"); ui()
                 } else if (SystemClock.uptimeMillis() - t0 > 10000) showNoCam("A câmara não arrancou (${cam.lastError.ifEmpty { "sem imagens" }}).")
                 else pv.postDelayed({ wait() }, 50)
@@ -330,10 +332,13 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     // ---------- geometry ----------
     private class Lay(val s: Float, val ox: Float, val oy: Float, val VW: Float, val VH: Float)
+    private var still: Bitmap? = null
+    private fun srcWi() = if (mode == "photo") still?.width ?: 0 else cam.srcW
+    private fun srcHi() = if (mode == "photo") still?.height ?: 0 else cam.srcH
     private fun layout(): Lay {
-        val VW = stage.width.toFloat(); val VH = stage.height.toFloat(); val w = cam.srcW.toFloat(); val h = cam.srcH.toFloat()
+        val VW = stage.width.toFloat(); val VH = stage.height.toFloat(); val w = srcWi().toFloat(); val h = srcHi().toFloat()
         if (w <= 0 || h <= 0) return Lay(1f, 0f, 0f, VW, VH)
-        val s = max(VW / w, VH / h)
+        val s = if (mode == "photo") min(VW / w, VH / h) else max(VW / w, VH / h)
         return Lay(s, (VW - w * s) / 2, (VH - h * s) / 2, VW, VH)
     }
     private fun tracking() = mode == "live" && (phase == "scan" || phase == "guide" || phase == "lock")
@@ -412,7 +417,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     ease = e; frameA = 1 - (t / .45f).coerceAtMost(1f)
                     if (t >= 1f) finishZoom()
                 }
-                "locked" -> { ease = 1f; frameA = 0f }
+                "locked" -> if (mode != "photo") { ease = 1f; frameA = 0f }
             }
             effZoom = camZoom.toDouble()
             val effR = (effZoom * 10).roundToInt()
@@ -448,7 +453,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     setMsg("Aponta " + listOf(h, v).filter { it.isNotEmpty() }.joinToString(" e ") + ".", "")
                 }
             }
-            val digital = sqrt(cam.srcW.toDouble() * cam.srcH / (f.w * f.h)); val zz = digital * camZoom
+            val digital = sqrt(srcWi().toDouble() * srcHi() / (f.w * f.h)); val zz = digital * (if (mode == "photo") 1f else camZoom)
             setSub(note.ifEmpty { "${STYLE_LABEL[style]}  ·  ≈ ${(26 * zz).roundToInt()} mm" })
         } else {
             setSub(if (mode == "live") note.ifEmpty { "${(26 * camZoom).roundToInt()} mm" } else "")
@@ -460,7 +465,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             pLine.color = if (ok) C.LOCK else C.AMBER; pLine.strokeWidth = 2 * d
             cv.drawLine(-len, 0f, -14 * d, 0f, pLine); cv.drawLine(14 * d, 0f, len, 0f, pLine); cv.restore()
         }
-        if (!zm) {
+        if (!zm && mode == "live") {
             pLine.color = if (aligned || phase == "locked") C.LOCK else 0xE6FFFFFF.toInt(); pLine.strokeWidth = 1.5f * d
             cv.drawLine(cx - 7 * d, cy, cx + 7 * d, cy, pLine); cv.drawLine(cx, cy - 7 * d, cx, cy + 7 * d, pLine)
         }
@@ -591,14 +596,15 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     }
 
     private fun findShot() {
-        if (busy || mode != "live" || cam.srcW == 0) return
+        if (busy || (mode != "live" && mode != "photo") || srcWi() == 0) return
+        val photo = mode == "photo"
         resetView()
         busy = true; phase = "scan"; frame = null; note = ""; plan = null; label = ""; subj = null; scanAt = SystemClock.uptimeMillis()
-        cam.trackOn = true; ui(); setMsg("A procurar a foto…", "")
+        cam.trackOn = !photo; ui(); setMsg("A procurar a foto…", "")
         lifecycleScope.launch {
             try {
-                val snap = snapshot(1280) ?: throw GErr("no_frame")
-                val srcW = cam.srcW.toDouble(); val srcH = cam.srcH.toDouble()
+                val snap = (if (photo) still?.let { b -> val k = min(1f, 1280f / max(b.width, b.height)); Bitmap.createScaledBitmap(b, max(1, (b.width * k).roundToInt()), max(1, (b.height * k).roundToInt()), true) } else snapshot(1280)) ?: throw GErr("no_frame")
+                val srcW = srcWi().toDouble(); val srcH = srcHi().toDouble()
                 val t0 = SystemClock.uptimeMillis()
                 val eng = gem.engine(); var pl: Plan? = null; var who = ""
                 if (eng == "gemini") gem.maybeRecheck()
@@ -607,7 +613,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     else if (gem.state == "down" || gem.state == "badkey") note = if (gem.state == "down") "Gemini em baixo." else "Chave do Gemini inválida."
                     else {
                         val b64 = withContext(Dispatchers.Default) { val o = ByteArrayOutputStream(); snap.compress(Bitmap.CompressFormat.JPEG, 85, o); Base64.encodeToString(o.toByteArray(), Base64.NO_WRAP) }
-                        val lensSizes = lensStops().map { L -> L to (cam.zoom * LENS_FILL / L * min(srcW, srcH * ratio) / srcW) }.filter { it.second < .95 }
+                        val lensSizes = (if (photo) emptyList() else lensStops()).map { L -> L to (cam.zoom * LENS_FILL / L * min(srcW, srcH * ratio) / srcW) }.filter { it.second < .95 }
                         val prompt = gem.prompt(snap.width, snap.height, ratio, seen, lensSizes); var last: Throwable = GErr("g_paused"); var q = 0; var n = 0
                         for (m in gem.modelOrder()) {
                             if (gem.pausedNow(m)) { last = GErr("g_paused"); continue }
@@ -628,7 +634,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 if (pl == null) { pl = Plan(null, null, look.styles[seen.size % look.styles.size], ""); who = "local" }
                 val plan0 = pl!!
                 val (fw, fh) = featureSize(srcW, srcH)
-                val z0 = cam.zoom; val stops = lensStops(); targetZoom = z0.toDouble(); scanZoom = z0.toDouble()
+                val z0 = cam.zoom; val stops = if (photo) emptyList() else lensStops(); targetZoom = z0.toDouble(); scanZoom = z0.toDouble()
                 var lensTxt = ""
                 val c = withContext(Dispatchers.Default) {
                     val small = Bitmap.createScaledBitmap(snap, fw, fh, true); val px = IntArray(fw * fh); small.getPixels(px, 0, fw, 0, 0, fw, fh)
@@ -659,9 +665,10 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 plan = plan0; subj = plan0.subj; style = plan0.rule; tip = plan0.tip.ifEmpty { LOCAL_TIP[plan0.rule] ?: "" }
                 label = plan0.name.ifEmpty { plan0.subj?.name ?: "" }
                 frame = c; zS = cam.zoom.toDouble(); lastCmd = zS; guideDist0 = 0f
-                cam.tracker.setAnchor(c.x / srcW, c.y / srcH, c.w / srcW, c.h / srcH)
+                if (!photo) cam.tracker.setAnchor(c.x / srcW, c.y / srcH, c.w / srcW, c.h / srcH)
                 seen.add(label.ifEmpty { "zona ${c.x.roundToInt()},${c.y.roundToInt()}" })
-                phase = "guide"
+                if (photo) { phase = "locked"; lockAt = SystemClock.uptimeMillis(); setMsg(tip.ifEmpty { "Arrasta o quadrado se quiseres. Toca no obturador." }, "ok") }
+                else phase = "guide"
             } catch (e: Throwable) { phase = "idle"; cam.trackOn = false; setMsg(errCopy(e), "err") }
             finally { busy = false; ui() }
         }
@@ -711,6 +718,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     // ---------- capture ----------
     private fun onShutter() {
         if (busy || capturing || mode == "idle" || phase == "lock" || phase == "zoom") return
+        if (mode == "photo") { shootStill(); return }
         val sw = cam.srcW.toDouble(); val sh = cam.srcH.toDouble(); if (sw <= 0) return
         var f = curFrame()
         if (f == null) { val w = min(sw, sh * ratio); val h = w / ratio; f = RectD((sw - w) / 2, (sh - h) / 2, w, h) }
@@ -718,51 +726,142 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         val lensZoom = cam.zoom; val digital = sqrt(sw * sh / (w * h))
         capturing = true; ui(); setMsg("A tirar a foto…", "ok")
         shutter.animate().scaleX(.92f).scaleY(.92f).setDuration(80).withEndAction { shutter.animate().scaleX(1f).scaleY(1f).setDuration(120).start() }.start()
+        val pl = plan; val st = style; val lbl0 = label
         cam.takePhoto(r, cam.srcW, cam.srcH) { photo, why ->
             capturing = false
             if (photo == null) { setMsg("A câmara não devolveu a foto ($why).", "err"); ui(); return@takePhoto }
-            val info = "${photo.bmp.width}×${photo.bmp.height} · ${"%.1f".format(photo.bmp.width * photo.bmp.height / 1e6)} MP · lente ${"%.1f".format(lensZoom)}× · ≈ ${(26 * digital * lensZoom).roundToInt()} mm"
-            val pl = plan
-            if (mode == "live") { phase = "idle"; frame = null; cam.trackOn = false; resetView(); setMsg("Aponta e toca em ✦ para encontrar a foto.", "dim") }
+            val eq = (26 * digital * lensZoom).roundToInt()
+            val lensTxt = "lente ${fmtZ(lensZoom.toDouble())}" + cam.lensNow().let { if (it.isNotEmpty()) " · $it" else "" }
+            val rec = Rec(System.currentTimeMillis(), System.currentTimeMillis(), digital * lensZoom, lbl0.ifEmpty { pl?.subj?.name ?: "" }, st,
+                pl?.filter ?: "clean", pl?.border ?: "none", "$eq mm  ${photo.exif}".trim() + "|" + lensTxt, photo.bmp.width, photo.bmp.height)
+            if (mode == "live") { phase = "idle"; frame = null; cam.trackOn = false; resetView(); setMsg("Guardada na galeria da app.", "ok") }
             ui()
-            openResult(photo.bmp, info + " · ${photo.ms} ms" + cam.lensNow().let { if (it.isNotEmpty()) " · $it" else "" }, pl)
+            storeAndOpen(rec, photo.bmp, "${photo.ms} ms")
         }
     }
+    /** Imported photo: cut the frame out of the original. */
+    private fun shootStill() {
+        val b = still ?: return
+        val f = frame ?: run { findShot(); return }
+        val x = f.x.roundToInt().coerceIn(0, b.width - 1); val y = f.y.roundToInt().coerceIn(0, b.height - 1)
+        val w = f.w.roundToInt().coerceIn(1, b.width - x); val h = f.h.roundToInt().coerceIn(1, b.height - y)
+        val crop = Bitmap.createBitmap(b, x, y, w, h)
+        val rec = Rec(System.currentTimeMillis(), System.currentTimeMillis(), sqrt(b.width.toDouble() * b.height / (w * h)), label.ifEmpty { plan?.subj?.name ?: "" }, style,
+            plan?.filter ?: "clean", plan?.border ?: "none", "|foto importada", w, h)
+        storeAndOpen(rec, crop, "")
+    }
+    private fun storeAndOpen(rec: Rec, bmp: Bitmap, extra: String) {
+        lifecycleScope.launch { withContext(Dispatchers.IO) { try { shots.add(bmp, rec) } catch (_: Exception) {} }; refreshThumb() }
+        openResult(rec, bmp, extra)
+    }
 
-    // ---------- result (phase 2 adds filters and borders) ----------
-    private fun openResult(bmp: Bitmap, info: String, pl: Plan?) {
+    // ---------- result: filters and borders, as in the web version ----------
+    private val shots by lazy { Shots(this) }
+    private var resJob: kotlinx.coroutines.Job? = null
+    private var curRec: Rec? = null
+
+    private fun infoOf(rec: Rec): ShotInfo {
+        val parts = rec.lens.split("|"); val settings = parts[0].ifEmpty { "—" }; val lensDesc = parts.getOrElse(1) { "" }
+        val d = java.util.Date(rec.date)
+        val ds = java.text.SimpleDateFormat("dd.MM.yyyy", java.util.Locale.US).format(d)
+        val label = rec.subj.ifEmpty { STYLE_LABEL[rec.style] ?: "Enquadra" }
+        val cam = (android.os.Build.MANUFACTURER.replaceFirstChar { it.uppercase() } + " " + android.os.Build.MODEL).trim()
+        return ShotInfo(cam, listOf(lensDesc, STYLE_LABEL[rec.style] ?: "").filter { it.isNotEmpty() }.joinToString(" · "), settings, ds, label, d)
+    }
+
+    private fun openResult(rec: Rec, bmp: Bitmap, extra: String) {
+        resultView?.let { (root.parent as FrameLayout).removeView(it) }
+        curRec = rec
         val host = root.parent as FrameLayout
         val v = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(C.INK); isClickable = true }
         val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; minimumHeight = dpi(40) }
-        val back = FrameLayout(this).apply { background = bg(C.PANEL, dp(21)); addView(Icon(this@MainActivity, "back", C.FG), FrameLayout.LayoutParams(-1, -1)); setOnClickListener { stepBack() } }
-        val infoT = text(11f, C.MUTED, F.mono, info).apply { gravity = Gravity.CENTER; maxLines = 2 }
-        head.addView(back, LinearLayout.LayoutParams(dpi(42), dpi(42))); head.addView(infoT, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dpi(10); rightMargin = dpi(52) })
-        val k = min(1f, 2048f / max(bmp.width, bmp.height))
-        val show = if (k < 1f) Bitmap.createScaledBitmap(bmp, (bmp.width * k).roundToInt(), (bmp.height * k).roundToInt(), true) else bmp
-        val img = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER; setImageBitmap(show) }
-        val sub = text(11f, C.MUTED, F.mono, listOfNotNull(pl?.name?.takeIf { it.isNotEmpty() }, pl?.filter?.let { "filtro sugerido: $it" }, pl?.border?.let { "margem: $it" }).joinToString("  ·  ")).apply { gravity = Gravity.CENTER }
+        val back = iconBtn("back") { stepBack() }
+        val mp = rec.w * rec.h / 1e6
+        val infoT = text(11f, C.MUTED, F.mono, listOf(rec.subj, (if (mp >= 1) "%.1f".format(mp) else "%.2f".format(mp)) + " MP", rec.lens.substringAfter("|"), extra).filter { it.isNotEmpty() }.joinToString("  ·  ")).apply { gravity = Gravity.CENTER; maxLines = 2 }
+        var arm = false
+        val del = iconBtn("del") {}
+        del.setOnClickListener {
+            if (!arm) { arm = true; del.background = bg(C.WARN, dp(21)); (del.getChildAt(0) as Icon).set("del", 0xFF1A0D05.toInt()); del.postDelayed({ arm = false; del.background = bg(C.PANEL, dp(21)); (del.getChildAt(0) as Icon).set("del", C.FG) }, 3000); setResultNote("Toca outra vez para apagar.", C.WARN); return@setOnClickListener }
+            shots.delete(rec.id); curRec = null; refreshThumb(); galleryView?.let { renderGallery() }; closeResult()
+        }
+        head.addView(back, LinearLayout.LayoutParams(dpi(42), dpi(42))); head.addView(infoT, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dpi(10); rightMargin = dpi(10) }); head.addView(del, LinearLayout.LayoutParams(dpi(42), dpi(42)))
+        val img = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
+        // the preview is rendered from a smaller copy; the full size only when saving
+        val k = min(1f, 1600f / max(bmp.width, bmp.height))
+        val base = if (k < 1f) Bitmap.createScaledBitmap(bmp, max(1, (bmp.width * k).roundToInt()), max(1, (bmp.height * k).roundToInt()), true) else bmp
+        fun rerender() {
+            resJob?.cancel()
+            resJob = lifecycleScope.launch {
+                val out = withContext(Dispatchers.Default) { render(base, rec.filter, rec.border, infoOf(rec)) }
+                img.setImageBitmap(out)
+            }
+        }
+        // filters: thumbnails made from the photo itself
+        val fRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val fScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(fRow) }
+        val fItems = ArrayList<Pair<String, LinearLayout>>()
+        val tk = 116f / min(bmp.width, bmp.height)
+        val thumbBase = Bitmap.createScaledBitmap(bmp, max(1, (bmp.width * tk).roundToInt()), max(1, (bmp.height * tk).roundToInt()), true)
+        fun markF() { for ((id, it) in fItems) { val on = id == rec.filter; (it.getChildAt(0) as ImageView).background = bg(0, dp(8), if (on) C.AMBER else 0, dpi(2)); (it.getChildAt(1) as TextView).setTextColor(if (on) C.AMBER else C.MUTED) } }
+        for (f in FILTERS) {
+            val iv = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; setPadding(dpi(2), dpi(2), dpi(2), dpi(2)); clipToOutline = true
+                outlineProvider = object : ViewOutlineProvider() { override fun getOutline(v: View, o: Outline) { o.setRoundRect(0, 0, v.width, v.height, dp(8)) } } }
+            val item = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
+                addView(iv, LinearLayout.LayoutParams(dpi(58), dpi(58)))
+                addView(text(10f, C.MUTED, F.monoMed, f.label.uppercase()).apply { letterSpacing = .06f }, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dpi(5) })
+                setOnClickListener { rec.filter = f.id; markF(); rerender(); shots.put(rec) } }
+            fRow.addView(item, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dpi(10) }); fItems.add(f.id to item)
+            lifecycleScope.launch { val t = withContext(Dispatchers.Default) { filtered(thumbBase, f.id) }; iv.setImageBitmap(t) }
+        }
+        markF()
+        // borders
+        val bRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val bScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(bRow) }
+        val bItems = ArrayList<Pair<String, LinearLayout>>()
+        fun markB() { for ((id, it) in bItems) { val on = id == rec.border; (it.getChildAt(0) as BorderIcon).on = on; (it.getChildAt(1) as TextView).setTextColor(if (on) C.AMBER else C.MUTED) } }
+        for ((id, lab) in BORDERS) {
+            val item = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; minimumWidth = dpi(52)
+                addView(BorderIcon(this@MainActivity, id), LinearLayout.LayoutParams(dpi(30), dpi(30)))
+                addView(text(10f, C.MUTED, F.monoMed, lab).apply { letterSpacing = .04f }, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dpi(5) })
+                setOnClickListener { rec.border = id; markB(); rerender(); shots.put(rec) } }
+            bRow.addView(item, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dpi(10) }); bItems.add(id to item)
+        }
+        markB()
         val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        val saved = text(12f, C.MUTED, F.mono, "Filtros e margens: fase 2.").oneLine()
+        val note = text(12f, C.MUTED, F.mono, "").oneLine(); resNote = note
+        val share = text(15f, C.FG, F.ui, "Partilhar").apply { background = bg(0, dp(999), C.LINE, dpi(1)); setPadding(dpi(16), dpi(11), dpi(16), dpi(11)) }
         val save = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; background = bg(C.AMBER, dp(999)); setPadding(dpi(22), dpi(12), dpi(22), dpi(12))
             addView(Icon(this@MainActivity, "check", 0xFF1A1405.toInt(), 18f), LinearLayout.LayoutParams(dpi(18), dpi(18)).apply { rightMargin = dpi(8) })
             addView(text(15f, 0xFF1A1405.toInt(), F.uiSemi, "Guardar"))
         }
-        save.setOnClickListener {
-            save.isEnabled = false; save.alpha = .5f; saved.text = "A guardar…"
+        fun export(then: (Uri) -> Unit) {
+            save.isEnabled = false; share.isEnabled = false; save.alpha = .5f; setResultNote("A preparar a foto…", C.MUTED)
             lifecycleScope.launch {
-                val uri = withContext(Dispatchers.IO) { saveJpeg(bmp) }
-                if (uri != null) { set.lastPhoto = uri.toString(); refreshThumb(); saved.setTextColor(C.LOCK); saved.text = "Guardada em Imagens/Enquadra." }
-                else { save.isEnabled = true; save.alpha = 1f; saved.setTextColor(C.WARN); saved.text = "Não consegui guardar." }
+                val uri = withContext(Dispatchers.Default) { try { saveJpeg(render(bmp, rec.filter, rec.border, infoOf(rec))) } catch (e: Throwable) { null } }
+                save.isEnabled = true; share.isEnabled = true; save.alpha = 1f
+                if (uri == null) { setResultNote("Não consegui guardar a foto.", C.WARN); return@launch }
+                rec.savedUri = uri.toString(); shots.put(rec); then(uri)
             }
         }
-        bar.addView(saved, LinearLayout.LayoutParams(0, -2, 1f)); bar.addView(save)
+        save.setOnClickListener { export { setMsg("Guardada na galeria (Imagens › Enquadra).", "ok"); closeResult() } }
+        share.setOnClickListener { export { u -> setResultNote("", C.MUTED)
+            startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("image/jpeg").putExtra(Intent.EXTRA_STREAM, u).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION), "Partilhar")) } }
+        bar.addView(share); bar.addView(note, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dpi(10); rightMargin = dpi(10) }); bar.addView(save)
         v.addView(head, LinearLayout.LayoutParams(-1, -2)); v.addView(img, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dpi(12) })
-        v.addView(sub, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dpi(10) }); v.addView(bar, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dpi(12) })
+        v.addView(fScroll, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dpi(12) }); v.addView(bScroll, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dpi(12) })
+        v.addView(bar, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dpi(12) })
         host.addView(v, FrameLayout.LayoutParams(-1, -1)); host.requestApplyInsets()
         v.alpha = 0f; v.animate().alpha(1f).setDuration(160).start()
         resultView = v
+        if (rec.filter != "clean" || rec.border != "none") setResultNote("Look sugerido pela IA.", C.MUTED)
+        rerender()
     }
+    private var resNote: TextView? = null
+    private fun setResultNote(t: String, c: Int) { resNote?.let { it.text = t; it.setTextColor(c) } }
+    private fun closeResult() { resultView?.let { (root.parent as FrameLayout).removeView(it) }; resultView = null; curRec = null; resNote = null }
+    private fun iconBtn(kind: String, click: () -> Unit) = FrameLayout(this).apply {
+        background = bg(C.PANEL, dp(21)); addView(Icon(this@MainActivity, kind, C.FG), FrameLayout.LayoutParams(-1, -1)); setOnClickListener { click() } }
 
     private fun saveJpeg(bmp: Bitmap): Uri? = try {
         val name = "Enquadra_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date()) + ".jpg"
@@ -771,23 +870,110 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Enquadra"); put(MediaStore.Images.Media.IS_PENDING, 1)
         }
         val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)!!
-        contentResolver.openOutputStream(uri)!!.use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+        contentResolver.openOutputStream(uri)!!.use { bmp.compress(Bitmap.CompressFormat.JPEG, 94, it) }
         cv.clear(); cv.put(MediaStore.Images.Media.IS_PENDING, 0); contentResolver.update(uri, cv, null, null)
         uri
     } catch (e: Exception) { null }
 
     private fun refreshThumb() {
-        val u = set.lastPhoto; if (u.isEmpty()) return
         lifecycleScope.launch {
-            val b = withContext(Dispatchers.IO) { try { contentResolver.loadThumbnail(Uri.parse(u), Size(160, 160), null) } catch (e: Exception) { null } }
-            if (b != null) { thumbImg.setImageBitmap(b); thumbImg.visibility = View.VISIBLE } else { thumbImg.visibility = View.GONE; set.lastPhoto = "" }
+            val b = withContext(Dispatchers.IO) { shots.all().firstOrNull()?.let { shots.thumb(it.id) } }
+            if (b != null) { thumbImg.setImageBitmap(b); thumbImg.visibility = View.VISIBLE } else thumbImg.visibility = View.GONE
         }
     }
-    private fun openLastPhoto() {
-        val u = set.lastPhoto
-        if (u.isEmpty()) { setMsg("Ainda não guardaste nenhuma foto.", "dim"); return }
-        try { startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(Uri.parse(u), "image/jpeg").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)) }
-        catch (e: Exception) { setMsg("Não há app para abrir a foto.", "err") }
+
+    // ---------- gallery: the app's own photos, grouped by day ----------
+    private var galleryView: View? = null
+    private var galGrid: LinearLayout? = null
+    private fun openGallery() {
+        val host = root.parent as FrameLayout
+        val v = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(C.INK); isClickable = true }
+        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; minimumHeight = dpi(40) }
+        head.addView(iconBtn("back") { stepBack() }, LinearLayout.LayoutParams(dpi(42), dpi(42)))
+        head.addView(text(17f, C.FG, F.uiSemi, "Galeria"), LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dpi(10) })
+        head.addView(text(15f, C.FG, F.ui, "Importar").apply { background = bg(0, dp(999), C.LINE, dpi(1)); setPadding(dpi(16), dpi(11), dpi(16), dpi(11)); setOnClickListener { pickPhoto.launch("image/*") } })
+        val grid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, 0, 0, dpi(8)) }
+        val scroll = ScrollView(this).apply { addView(grid) }
+        v.addView(head, LinearLayout.LayoutParams(-1, -2)); v.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dpi(12) })
+        v.addView(text(12f, C.MUTED, F.mono, "As fotos ficam guardadas só nesta app. Abre uma e carrega em Guardar para a teres na galeria do telemóvel."), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dpi(8) })
+        host.addView(v, FrameLayout.LayoutParams(-1, -1)); host.requestApplyInsets()
+        galleryView = v; galGrid = grid
+        renderGallery()
+    }
+    private fun renderGallery() {
+        val grid = galGrid ?: return
+        grid.removeAllViews()
+        val recs = shots.all()
+        if (recs.isEmpty()) { grid.addView(text(15f, C.MUTED, F.ui, "Ainda não há fotos. Tira uma com a câmara da app.").apply { gravity = Gravity.CENTER; setPadding(dpi(12), dpi(40), dpi(12), dpi(40)) }, LinearLayout.LayoutParams(-1, -2)); return }
+        val dayFmt = java.text.SimpleDateFormat("EEEE, d 'de' MMMM", java.util.Locale("pt", "PT")); val key = java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US)
+        val today = key.format(java.util.Date()); val yest = key.format(java.util.Date(System.currentTimeMillis() - 86400000L))
+        val hm = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US)
+        var lastDay = ""; var row: LinearLayout? = null
+        for (r in recs) {
+            val d = java.util.Date(r.date); val k = key.format(d)
+            if (k != lastDay) {
+                lastDay = k; row = null
+                val name = if (k == today) "Hoje" else if (k == yest) "Ontem" else dayFmt.format(d)
+                grid.addView(text(11f, C.MUTED, F.mono, name.uppercase()).apply { letterSpacing = .08f; setPadding(0, dpi(if (grid.childCount == 0) 0 else 14), 0, dpi(8)) }, LinearLayout.LayoutParams(-1, -2))
+            }
+            val cur0 = row
+            val rw: LinearLayout = if (cur0 == null || cur0.childCount >= 2) LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }.also { grid.addView(it, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dpi(18) }) } else cur0
+            row = rw
+            val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            val ph = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; background = bg(C.PANEL, dp(12)); clipToOutline = true
+                outlineProvider = object : ViewOutlineProvider() { override fun getOutline(v: View, o: Outline) { o.setRoundRect(0, 0, v.width, v.height, dp(12)) } } }
+            val cardW = (resources.displayMetrics.widthPixels - dpi(32) - dpi(12)) / 2
+            card.addView(ph, LinearLayout.LayoutParams(-1, (cardW * 1.25f).roundToInt()))
+            card.addView(text(13f, C.FG, F.uiMed, r.subj.ifEmpty { "foto" }).oneLine(), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dpi(7) })
+            card.addView(text(11f, C.MUTED, F.mono, hm.format(d) + (if (r.zoom > 0) "  ·  ${(26 * r.zoom).roundToInt()} mm" else "")), LinearLayout.LayoutParams(-1, -2))
+            card.setOnClickListener { val b = shots.load(r.id); if (b != null) openResult(r, b, "") else setMsg("Não consegui abrir essa foto.", "err") }
+            val second = rw.childCount == 1
+            rw.addView(card, LinearLayout.LayoutParams(0, -2, 1f).apply { if (second) leftMargin = dpi(12) })
+            lifecycleScope.launch { val t = withContext(Dispatchers.IO) { shots.thumb(r.id) }; ph.setImageBitmap(t) }
+        }
+        val last = row
+        if (last != null && last.childCount == 1) last.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f).apply { leftMargin = dpi(12) })
+    }
+
+    // ---------- photo mode: frame a photo from the phone's gallery ----------
+    private val pickPhoto = registerForActivityResult(ActivityResultContracts.GetContent()) { uri -> if (uri != null) importPhoto(uri) }
+    private fun importPhoto(uri: Uri) {
+        lifecycleScope.launch {
+            val b = withContext(Dispatchers.IO) {
+                try { android.graphics.ImageDecoder.decodeBitmap(android.graphics.ImageDecoder.createSource(contentResolver, uri)) { dec, info, _ ->
+                    val s = info.size; val k = min(1f, 4096f / max(s.width, s.height))
+                    if (k < 1f) dec.setTargetSize((s.width * k).roundToInt(), (s.height * k).roundToInt())
+                    dec.allocator = android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE } } catch (e: Exception) { null }
+            }
+            if (b == null) { setMsg("Não consegui abrir essa imagem.", "err"); return@launch }
+            galleryView?.let { (root.parent as FrameLayout).removeView(it) }; galleryView = null; galGrid = null
+            clearShot()
+            still = b; mode = "photo"; stillView.setImageBitmap(b); stillView.visibility = View.VISIBLE; pv.alpha = 0f
+            seen.clear(); ui(); findShot()
+        }
+    }
+    private fun leavePhoto() {
+        still = null; stillView.setImageDrawable(null); stillView.visibility = View.GONE; pv.alpha = 1f
+        mode = if (cam.srcW > 0) "live" else "idle"; clearShot()
+    }
+    private var drag: FloatArray? = null
+    @SuppressLint("ClickableViewAccessibility")
+    private fun installDrag() {
+        ov.setOnTouchListener { _, e ->
+            if (mode != "photo" || busy) return@setOnTouchListener false
+            val f = frame ?: return@setOnTouchListener false
+            val L = layout()
+            when (e.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    val fx = L.ox + f.x * L.s; val fy = L.oy + f.y * L.s
+                    if (e.x < fx || e.y < fy || e.x > fx + f.w * L.s || e.y > fy + f.h * L.s) return@setOnTouchListener false
+                    drag = floatArrayOf(e.x, e.y, f.x.toFloat(), f.y.toFloat()); true
+                }
+                android.view.MotionEvent.ACTION_MOVE -> { val d = drag ?: return@setOnTouchListener false
+                    frame = RectD(cl(d[2] + (e.x - d[0]) / L.s.toDouble(), 0.0, srcWi() - f.w), cl(d[3] + (e.y - d[1]) / L.s.toDouble(), 0.0, srcHi() - f.h), f.w, f.h); true }
+                else -> { drag = null; true }
+            }
+        }
     }
 
     // ---------- settings ----------
@@ -896,7 +1082,9 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             host.removeView(v); settingsView = null; renderEngine()
             (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager).hideSoftInputFromWindow(root.windowToken, 0); return
         }
-        resultView?.let { host.removeView(it); resultView = null; return }
+        resultView?.let { closeResult(); galleryView?.let { renderGallery() }; return }
+        galleryView?.let { host.removeView(it); galleryView = null; galGrid = null; return }
+        if (mode == "photo") { leavePhoto(); return }
         if (phase != "idle") { clearShot(); return }
         finish()
     }
