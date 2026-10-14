@@ -114,7 +114,7 @@ Coordinates are integers normalized to 0-1000."""
         return """You are a photo director. This image is the phone's zoomed-in view, about to be photographed (${w}x${h}). The subject is: "$subject".
 ${persona().text}$extra
 Make the final composition adjustment yourself: choose the best final crop inside this image, a rectangle with width:height = ${"%.3f".format(java.util.Locale.US, ratio)}, at least 80% of the largest such rectangle (small adjustments only). Place the subject well, keep the horizon level-looking, remove distracting edges and anything cut awkwardly at the borders. If the current full view is already best, return it.
-Then give one short tip for a beginner in European Portuguese (max 6 words, no photography jargon such as simetria, terços, regra, composição): what to do now, e.g. "Fica parado e dispara" or "Espera pela onda".
+The app applies your crop itself, so the person must NOT move, tilt, rotate or re-aim the phone. Then give one short tip in European Portuguese (max 6 words) only about the moment to shoot, never about moving or tilting the phone, e.g. "Fica parado e dispara" or "Espera pela onda". Use "" if there is nothing to wait for.
 Answer with JSON only: {"shot_box":[ymin,xmin,ymax,xmax],"tip":"..."}
 Coordinates are integers normalized to 0-1000."""
     }

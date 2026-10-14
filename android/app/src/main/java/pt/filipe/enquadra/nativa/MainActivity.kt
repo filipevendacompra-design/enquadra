@@ -758,8 +758,10 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             val moved = abs(nf.x - full.x) + abs(nf.y - full.y) + abs(nf.w - full.w)
             if (moved > maxW * .02) { refFrom = full; refAt = SystemClock.uptimeMillis(); frame = nf; refined = true }
         }
-        val tipNow = t2.ifEmpty { tip }
-        setMsg(tipNow.ifEmpty { "Pronto. Tira a foto." }, "ok")
+        // the frame is final now: no more instructions to move or tilt the phone, only about the moment
+        val moveWords = Regex("(?i)inclin|rod[ae]|mov|apont|diagonal|desloc|sobe|baix|aproxim|afast|enquadr|vir[ae]|esquerda|direita|cima|centr|simetri|terç|regra|compos")
+        val tipNow = t2.takeIf { it.isNotBlank() && !moveWords.containsMatchIn(it) }
+        setMsg(tipNow ?: "Pronto. Toca no obturador.", "ok")
         note = (if (note.isNotEmpty()) "$note · " else "") + (if (refined) "afinado" else "sem ajuste")
     }
 
