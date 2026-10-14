@@ -642,9 +642,9 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         // Gemini picked the lens (it was told each lens's frame size): keep its choice and its framing, only nudge it
                         val gl = plan0.lens?.let { l -> stops.firstOrNull { abs(it - l) < .05 } }
                         var L = if (gl != null) fitLens(gl, stops, plan0.subj, z0, srcW, srcH) else pickLens(zRaw, stops, plan0.subj, z0, srcW, srcH)
-                        // a small, distant subject that fits the 5x frame comfortably is shot at 5x, whatever lens Gemini said
+                        // without a lens from Gemini, a really small subject (less than half the 5x frame) is shot at 5x
                         val sj0 = plan0.subj
-                        if (L < 4.9 && sj0 != null && stops.any { abs(it - 5) < .01 } && fits(sj0, 5.0, z0, srcW, srcH, .8)) L = 5.0
+                        if (L < 4.9 && gl == null && sj0 != null && stops.any { abs(it - 5) < .01 } && fits(sj0, 5.0, z0, srcW, srcH, .45)) L = 5.0
                         val s = (z0 * LENS_FILL / L).coerceIn(.06, 1.0)
                         lensTxt = "lente ${fmtZ(L)}" + (if (gl != null) (if (abs(gl - L) > .01) " (gemini ${fmtZ(gl)}, motivo grande)" else " (gemini)") else if (plan0.lens != null) " (gemini pediu ${plan0.lens})" else ""); targetZoom = L
                         val sh = plan0.shot
@@ -684,14 +684,15 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         cam.trackOn = false; zoomFrom = cam.zoom.toDouble(); zoomNow = zoomFrom; zoomStart = now
         // the zoom that makes the frame fill the photo area (snapped to the lens chosen with it)
         val maxW = min(sw, sh * ratio); val zFill = zoomFrom * maxW / w
-        if (abs(ln(zFill / targetZoom)) > .15) targetZoom = zFill.coerceIn(cam.minZoom.toDouble(), cam.maxZoom.toDouble())
+        // the lens was chosen with the frame; a tracking error must never send the zoom elsewhere (it once went to 10x)
+        lastMatch = "zoom ${fmtZ(targetZoom)} (quadrado pedia ${"%.1f".format(zFill)}×)"
         phase = "zoom"; setMsg("A enquadrar a foto…", "ok"); ui()
     }
     private fun finishZoom() {
         val sw = cam.srcW.toDouble(); val sh = cam.srcH.toDouble(); val w = min(sw, sh * ratio); val h = w / ratio
         frame = RectD((sw - w) / 2, (sh - h) / 2, w, h)      // the photo is now the whole view (in the chosen format)
         phase = "locked"; lockAt = SystemClock.uptimeMillis()
-        lastMatch = "zoom real até ${fmtZ(targetZoom)}"
+        lastMatch = "$lastMatch · sensor ${cam.lensNow()}"
         setMsg(tip.ifEmpty { "Enquadrado. Tira a foto." }, "ok"); ui()
     }
 
