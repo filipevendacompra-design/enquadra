@@ -290,6 +290,20 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private fun lensStops(): List<Double> = listOf(1.0, 3.0, 5.0).filter { it >= cam.minZoom - 1e-3 && it <= cam.maxZoom + 1e-3 }
     private fun fmtZ(z: Double) = if (abs(z - z.roundToInt()) < .05) "${z.roundToInt()}×" else "%.1f×".format(z)
 
+    /** While aiming, tap a lens to take the shot with it: the frame keeps its centre and takes that lens's size. */
+    private fun chooseLens(L: Double) {
+        val f = frame ?: return
+        val sw = cam.srcW.toDouble(); val sh = cam.srcH.toDouble()
+        val w = min(sw, sh * ratio) * scanZoom * LENS_FILL / L; val h = w / ratio
+        if (w > sw || h > sh) return
+        val cx = f.x + f.w / 2; val cy = f.y + f.h / 2
+        frame = RectD(cl(cx - w / 2, 0.0, sw - w), cl(cy - h / 2, 0.0, sh - h), w, h)
+        frame?.let { cam.tracker.setAnchor(it.x / sw, it.y / sh, it.w / sw, it.h / sh) }
+        targetZoom = L; note = note.replace(Regex("lente [^·]*$"), "lente ${fmtZ(L)} (tua)").let { if (it.contains("(tua)")) it else "$it · lente ${fmtZ(L)} (tua)" }
+        lastEffR = -1; renderLenses()
+    }
+    private var scanZoom = 1.0
+
     private fun pillText(v: Double) = when {
         v < .995 -> "%.1f".format(v).removePrefix("0").replace(",", ".")
         abs(v - v.roundToInt()) < .05 -> v.roundToInt().toString()
@@ -298,16 +312,17 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private fun renderLenses() {
         lenses.removeAllViews()
         if (mode != "live" || phase == "scan") return
-        val idle = phase == "idle"
-        val vals = lensValues()
-        val eff = if (idle) homeZoom.toDouble() else effZoom
+        val idle = phase == "idle"; val aiming = phase == "guide"
+        val vals = if (aiming) lensStops().map { it.toFloat() } else lensValues()
+        val eff = if (idle) homeZoom.toDouble() else if (aiming) targetZoom else effZoom
         val active = vals.lastOrNull { it <= eff + .05 } ?: vals.firstOrNull()
         for (v in vals) {
             val on = active != null && abs(v - active) < 1e-3
-            val label = if (on && !idle) pillText(eff) else pillText(v.toDouble())
+            val label = if (on && !idle && !aiming) pillText(eff) else pillText(v.toDouble())
             val t = text(11f, if (on) C.AMBER else C.FG, F.monoMed, label).apply {
                 gravity = Gravity.CENTER; background = bg(if (on) C.RAISE else C.PANEL, dp(18))
                 if (idle) setOnClickListener { homeZoom = v; cam.setZoom(v); renderLenses(); ui() }
+                if (aiming) setOnClickListener { chooseLens(v.toDouble()) }
             }
             lenses.addView(t, LinearLayout.LayoutParams(if (on && !idle && label.length > 3) dpi(48) else dpi(36), dpi(36)).apply { leftMargin = dpi(4); rightMargin = dpi(4) })
         }
@@ -613,7 +628,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 if (pl == null) { pl = Plan(null, null, look.styles[seen.size % look.styles.size], ""); who = "local" }
                 val plan0 = pl!!
                 val (fw, fh) = featureSize(srcW, srcH)
-                val z0 = cam.zoom; val stops = lensStops(); targetZoom = z0.toDouble()
+                val z0 = cam.zoom; val stops = lensStops(); targetZoom = z0.toDouble(); scanZoom = z0.toDouble()
                 var lensTxt = ""
                 val c = withContext(Dispatchers.Default) {
                     val small = Bitmap.createScaledBitmap(snap, fw, fh, true); val px = IntArray(fw * fh); small.getPixels(px, 0, fw, 0, 0, fw, fh)
@@ -834,6 +849,21 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         }.apply { layoutParams = LinearLayout.LayoutParams(-2, -2) }, testOut), lp(20))
         val diag = outText().apply { setTextIsSelectable(true) }
         diag.text = "Enquadra nativa ${packageManager.getPackageInfo(packageName, 0).versionName}\n${cam.info()}\n${lastMatch.ifEmpty { "ainda sem troca de lente" }}"
+        val lensOut = outText().apply { setTextIsSelectable(true) }
+        body.addView(field(lbl("Teste das lentes"), para("Passa por cada zoom e mostra que sensor o telemóvel usa de facto. Se o 5× disser o mesmo sensor que o 3×, a Samsung não dá a lente 5× a esta app."),
+            btn("Testar lentes") {
+                lensOut.setTextColor(C.MUTED); lensOut.text = "A testar…"
+                lifecycleScope.launch {
+                    val zs = listOf(cam.minZoom.toDouble(), 1.0, 2.0, 2.9, 3.0, 4.0, 5.0, 7.0, 10.0).filter { it >= cam.minZoom - 1e-3 && it <= cam.maxZoom + 1e-3 }.distinct()
+                    val sb = StringBuilder()
+                    for (z in zs) {
+                        suspendCancellableCoroutine<Unit> { c -> cam.setZoom(z.toFloat()) { if (c.isActive) c.resume(Unit) } }
+                        kotlinx.coroutines.delay(900)
+                        sb.append("${"%.1f".format(z)}× → ${cam.lensNow().ifEmpty { "sensor ?" }}\n"); lensOut.text = sb.toString()
+                    }
+                    cam.setZoom(homeZoom); lensOut.setTextColor(C.FG); lensOut.text = sb.toString() + "sensores: ${cam.physList}\ncâmara lógica:${cam.logicalFullRes}"
+                }
+            }.apply { layoutParams = LinearLayout.LayoutParams(-2, -2) }, lensOut), lp(20))
         body.addView(field(lbl("Diagnóstico"), diag, btn("Copiar diagnóstico") {
             (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("diag", diag.text)); diag.setTextColor(C.LOCK)
         }.apply { layoutParams = LinearLayout.LayoutParams(-2, -2) }), lp(20))

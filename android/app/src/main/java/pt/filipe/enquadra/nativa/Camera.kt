@@ -51,7 +51,7 @@ class Cam(private val ctx: Context) {
 
     fun info(): String {
         val c = capture?.resolutionInfo?.resolution; val a = analysis?.resolutionInfo?.resolution
-        return "sensores: ${physList.ifEmpty { "?" }}\nagora: ${lensNow().ifEmpty { "?" }} a ${"%.1f".format(zoom)}×\n" +
+        return "sensores: ${physList.ifEmpty { "?" }}\ncâmara lógica:$logicalFullRes\nagora: ${lensNow().ifEmpty { "?" }} a ${"%.1f".format(zoom)}×\n" +
             (if (exactZoom) "zoom por frame: sim · " else "zoom por frame: não · ") + "foto ${c?.width ?: "?"}×${c?.height ?: "?"} · análise ${a?.width ?: "?"}×${a?.height ?: "?"} · zoom ${"%.2f".format(minZoom)}–${"%.1f".format(maxZoom)}" +
             (if (tracker.anchorErr >= 0) " · âncora ${"%.0f".format(tracker.anchorErr)}" else "") +
             (if (lastError.isNotEmpty()) "\nerro: $lastError" else "")
@@ -136,12 +136,24 @@ class Cam(private val ctx: Context) {
                 val sz = ch.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
                 val eq = if (sz != null) (f * 43.27 / Math.hypot(sz.width.toDouble(), sz.height.toDouble())).roundToInt() else 0
                 val px = ch.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
-                physDesc[p] = "≈${eq} mm" + (if (px != null) " ${"%.0f".format(px.width * px.height / 1e6)} MP" else "")
+                physDesc[p] = "≈${eq} mm" + (if (px != null) " ${"%.0f".format(px.width * px.height / 1e6)} MP" else "") + fullRes(ch)
             }
             physList = ids.sortedBy { physDesc[it] ?: "" }.joinToString(", ") { "$it ${physDesc[it]}" }
+            logicalFullRes = fullRes(cm.getCameraCharacteristics(id)).ifEmpty { " (Android antigo)" }
         } catch (e: Throwable) { physList = "?" }
     }
     var physList = ""; private set
+    var logicalFullRes = ""; private set
+    /** Does this camera offer its full-resolution mode (the "50 MP" of the Samsung app) to other apps? */
+    private fun fullRes(ch: android.hardware.camera2.CameraCharacteristics): String {
+        if (android.os.Build.VERSION.SDK_INT < 31) return ""
+        val caps = ch.get(android.hardware.camera2.CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: return ""
+        if (!caps.contains(android.hardware.camera2.CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR)) return " (sem modo resolução total)"
+        val m = ch.get(android.hardware.camera2.CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION)
+        val big = m?.getOutputSizes(android.graphics.ImageFormat.JPEG)?.maxByOrNull { it.width.toLong() * it.height }
+            ?: m?.getOutputSizes(android.graphics.ImageFormat.RAW_SENSOR)?.maxByOrNull { it.width.toLong() * it.height }
+        return if (big != null) " (resolução total ${big.width}×${big.height})" else " (resolução total: sim)"
+    }
     fun lensNow(): String = if (activePhys.isEmpty()) "" else "sensor $activePhys ${physDesc[activePhys] ?: ""}".trim()
 
     fun setZoom(z: Float, done: (() -> Unit)? = null) {

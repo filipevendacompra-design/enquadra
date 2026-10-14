@@ -12,8 +12,8 @@ android {
         applicationId = "pt.filipe.enquadra.nativa"
         minSdk = 29
         targetSdk = 34
-        versionCode = 7
-        versionName = "N0.7"
+        versionCode = 8
+        versionName = "N0.8"
     }
     signingConfigs {
         getByName("debug") {
