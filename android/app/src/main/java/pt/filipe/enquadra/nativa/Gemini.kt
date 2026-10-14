@@ -87,15 +87,20 @@ class Gemini(private val set: Settings) {
         val avoid = if (seen.isNotEmpty()) "\nThe user asked for another option: choose something different from ${seen.takeLast(4).joinToString(", ") { "\"$it\"" }}." else ""
         val p = persona()
         val extra = if (set.extra.isNotEmpty()) "\nThe photographer's own direction (follow it): ${set.extra.take(400)}" else ""
-        return """You are a photo director helping someone take a striking phone photo. The image is the live camera view through the ultra-wide lens (${if (w > h) "landscape" else "portrait"}, ${w}x${h}).
+        return """You are an award-winning photographer with a strong personal eye, walking with someone who knows nothing about photography. The image is their live camera view (${if (w > h) "landscape" else "portrait"}, ${w}x${h}).
+Your job is to find the single most beautiful PHOTOGRAPH hidden in this view. Not the most important or recognisable object: a photograph is made of light, shape, colour, texture and composition, not of "things". A dull sign, a parked car, a bin or a generic building is never the answer just because it is recognisable.
+Think before answering, in this order:
+1. Light: where is the most interesting light? Low warm sun, backlight, rim light, glow, hard shadows and their shapes, light and dark patterns, reflections in water or glass.
+2. Graphics: strong shapes, lines that lead somewhere, repetition and rhythm, curves, contrasts of colour or tone, a small element against a large empty space, layers from near to far.
+3. The photo: which part of the scene, cropped tight, becomes a clean, intentional picture with ONE clear point of interest, a simple background and nothing distracting or awkwardly cut at the edges?
+Compose like a master: put the point of interest on a strong point (about one third in from two edges) or exactly in the middle when the scene is symmetric; let lines lead into the picture towards it; leave empty space in front of people, animals and vehicles in the direction they look or move; keep the horizon straight and high or low, never through the middle unless it is a reflection; never put a bright lamp, street light or bulb at the centre of interest (use what its light falls on, its glow or its reflection); the sun at sunset is fine.
 ${p.text}$extra
-Pick ONE subject in it that would make the most beautiful photo when isolated with a telephoto lens (about 3x to 5x from this wide view). Favour: light (sun, golden light, glowing windows, light through leaves), reflections, silhouettes, strong shapes, one isolated object, textures, leading lines that end in something. Avoid: things cut by the image edge, clutter, plain empty sky. Never pick a lamp, street light or light bulb as the subject; choose what the light falls on, its glow on a surface, or its reflection, and keep bright lamps away from the edges of the shot. The sun at sunset is fine.
-Then propose the shot: a rectangle with width:height = ${"%.3f".format(java.util.Locale.US, ratio)} that contains the subject and places it with a composition rule. ${lensText(lenses, p.cover)} Leave space in front of people or animals in the direction they look or move.
-Finally choose the look of the finished photo to match the mood of that shot (do not default to the same every time):
+Then propose the shot: a rectangle with width:height = ${"%.3f".format(java.util.Locale.US, ratio)}. ${lensText(lenses, p.cover)}
+Finally choose the look of the finished photo to match its mood (do not default to the same every time):
 filter, one of: clean (natural), vivo (punchy colour), quente (warm), claro (bright and airy), suave (soft, faded), pelicula (film with grain), dourado (golden glow), cinema (teal and orange, vignette), porto (crisp, clean contrast), dusk (warm evening), relic (vintage), lofi (high contrast, saturated), pb (black and white), noir (dramatic black and white).
 border, one of: none, white (thin white), ficha (white with camera specs), polaroid (instant photo with handwritten caption), galeria (museum mat), pelicula (film frame), desfocado (blurred square backdrop), paper (cream paper with caption), date (orange date stamp).$avoid
-Answer with JSON only:
-{"subject":"short description in European Portuguese, max 4 words, lowercase","subject_box":[ymin,xmin,ymax,xmax],"shot_box":[ymin,xmin,ymax,xmax],"rule":"tercos|aurea|centro|simetrico|diagonal|minimal|moldura","tip":"one short, plain instruction in European Portuguese that a beginner understands: what to do with the phone or when to shoot, max 6 words, no photography jargon (never words like simetria, terços, regra, composição, enquadra), e.g. 'Fica parado e dispara' or 'Espera que a pessoa passe'","filter":"one id from the list","border":"one id from the list"$lensField}
+Answer with JSON only, with the fields in this order (write the idea first, then decide the rest from it):
+{"idea":"the photo in one sentence in European Portuguese, about light, shape and mood, e.g. 'reflexo dourado do sol entre duas sombras compridas'","subject":"the point of interest in European Portuguese, max 4 words, lowercase","subject_box":[ymin,xmin,ymax,xmax],"shot_box":[ymin,xmin,ymax,xmax]$lensField,"rule":"tercos|aurea|centro|simetrico|diagonal|minimal|moldura","tip":"for someone who knows nothing about photography: where the main things sit in this photo, in simple European Portuguese, max 9 words, using only plain places (ao centro, em cima, em baixo, à esquerda, à direita, no canto de cima à direita...). Examples: 'Sol em cima à direita, mar em baixo', 'Pessoa ao centro, céu por cima', 'Barco pequeno à esquerda, muita água à volta'. Never use words like terços, simetria, diagonal, regra, composição, áurea, enquadra","filter":"one id from the list","border":"one id from the list"}
 Coordinates are integers normalized to 0-1000."""
     }
 
@@ -133,7 +138,8 @@ Coordinates are integers normalized to 0-1000."""
     private suspend fun ask1(b64: String?, prompt: String, m: String, timeout: Int, lowThink: Boolean): String = withContext(Dispatchers.IO) {
         val gen = JSONObject().put("responseMimeType", "application/json").put("temperature", persona().temp)
         // thinking makes Gemini 3 slow; framing a photo needs little of it
-        if (lowThink) gen.put("thinkingConfig", JSONObject().put("thinkingLevel", if (m.contains("3.8")) "low" else "minimal"))
+        // a photo needs a little thought (taste); the 8 s health pings need none
+        if (lowThink) gen.put("thinkingConfig", JSONObject().put("thinkingLevel", if (b64 != null || m.contains("3.8")) "low" else "minimal"))
         val parts = JSONArray().put(JSONObject().put("text", prompt))
         if (b64 != null) parts.put(JSONObject().put("inline_data", JSONObject().put("mime_type", "image/jpeg").put("data", b64)))
         val body = JSONObject().put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", parts))).put("generationConfig", gen).toString()
@@ -223,7 +229,7 @@ fun fromAI(res: JSONObject): Plan {
     val filter = res.optString("filter").takeIf { it in FILTER_IDS }
     val border = res.optString("border").takeIf { it in BORDER_IDS }
     val lens = res.optDouble("lens", Double.NaN).takeIf { !it.isNaN() && it > 0 }
-    return Plan(subj, shot, rule, res.optString("tip", "").take(60), filter, border, subj.name, lens)
+    return Plan(subj, shot, rule, res.optString("tip", "").take(70), filter, border, subj.name, lens).also { it.idea = res.optString("idea", "").take(120) }
 }
 
 fun errCopy(e: Throwable): String {

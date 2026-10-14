@@ -10,8 +10,8 @@ import kotlin.math.*
 val STYLE_IDS = listOf("tercos", "simetrico", "minimal", "aurea", "diagonal", "centro", "moldura")
 val STYLE_LABEL = mapOf("tercos" to "Terços", "simetrico" to "Simetria", "minimal" to "Minimal", "aurea" to "Proporção áurea",
     "diagonal" to "Diagonal", "centro" to "Centro", "moldura" to "Moldura natural")
-val LOCAL_TIP = mapOf("tercos" to "Motivo num ponto forte", "simetrico" to "Eixo da cena ao centro", "minimal" to "Deixa o vazio trabalhar",
-    "aurea" to "Motivo no ponto áureo", "diagonal" to "Segue a diagonal", "centro" to "Motivo ao centro", "moldura" to "A cena emoldura o motivo")
+val LOCAL_TIP = mapOf("tercos" to "O motivo fica um pouco ao lado", "simetrico" to "Tudo equilibrado ao centro", "minimal" to "Muito espaço vazio à volta",
+    "aurea" to "O motivo fica um pouco ao lado", "diagonal" to "Linhas a atravessar a foto", "centro" to "O motivo fica ao centro", "moldura" to "A cena faz de moldura ao motivo")
 
 fun cl(v: Double, a: Double, b: Double) = min(b, max(a, v))
 private fun clI(v: Int, a: Int, b: Int) = min(b, max(a, v))
@@ -19,7 +19,7 @@ private fun jsRound(v: Double) = floor(v + 0.5).toInt()   // Math.round
 
 class Subj(val name: String, val cls: String?, val w: Double, val box: DoubleArray, val focus: DoubleArray, val facing: String = "none")
 class Shot(val x: Double, val y: Double, val w: Double, val h: Double)
-class Plan(var subj: Subj?, var shot: Shot?, var rule: String, var tip: String, var filter: String? = null, var border: String? = null, var name: String = "", var lens: Double? = null)
+class Plan(var subj: Subj?, var shot: Shot?, var rule: String, var tip: String, var filter: String? = null, var border: String? = null, var name: String = "", var lens: Double? = null) { var idea = "" }
 data class RectD(val x: Double, val y: Double, val w: Double, val h: Double)
 class Crop(val x0: Int, val y0: Int, val cw: Int, val ch: Int)
 

@@ -58,7 +58,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private val seen = ArrayList<String>()
     private var zoomed = false; private var lockAt = 0L; private var alignedSince = 0L
     private var homeZoom = 1f
-    private val LENS_FILL = 1.0       // after the zoom the frame fills the photo area, as in Framed
+    private val LENS_FILL = .9        // after the zoom the frame fills 90% of the view: room to find it again if the phone moved
     private var roll = 0.0; private var levelValid = false
     private var grid = true; private var levelOn = true
     private var lastMatch = ""
@@ -185,7 +185,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         val hud = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val status = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; minimumHeight = dpi(40) }
         msgEl = text(13f, C.AMBER, F.monoMed).apply { gravity = Gravity.CENTER }
-        subEl = text(11f, C.MUTED, F.mono).apply { gravity = Gravity.CENTER; minHeight = dpi(15) }.oneLine()
+        subEl = text(11f, C.MUTED, F.mono).apply { gravity = Gravity.CENTER; minHeight = dpi(15); maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END }
         status.addView(msgEl, LinearLayout.LayoutParams(-1, -2)); status.addView(subEl, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dpi(2) })
         lenses = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; minimumHeight = dpi(36) }
         val controls = FrameLayout(this)
@@ -665,7 +665,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     cr?.let { toFrame(it, F, srcW, srcH, ratio) }
                 } ?: throw GErr("no_crop")
                 val dt = "%.1f".format((SystemClock.uptimeMillis() - t0) / 1000.0)
-                note = (if (note.isNotEmpty()) "$note  " else "") + "$who · $dt s" + (if (lensTxt.isNotEmpty()) " · $lensTxt" else "")
+                note = (if (plan0.idea.isNotEmpty()) "${plan0.idea}  ·  " else "") + (if (note.isNotEmpty()) "$note  " else "") + "$who · $dt s" + (if (lensTxt.isNotEmpty()) " · $lensTxt" else "")
                 if (phase != "scan") return@launch     // cancelled meanwhile
                 plan = plan0; subj = plan0.subj; style = plan0.rule; tip = plan0.tip.ifEmpty { LOCAL_TIP[plan0.rule] ?: "" }
                 label = plan0.name.ifEmpty { plan0.subj?.name ?: "" }
@@ -688,7 +688,17 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         if (curFrame() == null) return
         phase = "lock"; lockAt = SystemClock.uptimeMillis(); alignedSince = 0
         setMsg("Centrado — a enquadrar…", "ok"); ui()
+        // remember what the frame shows right now: after the zoom we look for exactly this
+        val token = lockAt; zoomRef = null
+        lifecycleScope.launch {
+            val g = hiGray(320) ?: return@launch
+            val t = trackedFrame() ?: return@launch
+            if (phase != "lock" || lockAt != token) return@launch
+            val kg = g.W / cam.srcW.toDouble(); val TW = 40; val TH = max(16, (TW / ratio).roundToInt())
+            zoomRef = sampleGray(g, t.x * kg, t.y * kg, t.w * kg, t.h * kg, TW, TH); zoomRefFrame = t
+        }
     }
+    private var zoomRef: FloatArray? = null; private var zoomRefFrame: RectD? = null
     private fun startZoom(now: Long) {
         val t = trackedFrame() ?: return
         val sw = cam.srcW.toDouble(); val sh = cam.srcH.toDouble(); val w = min(t.w, sw); val h = min(t.h, sh)
@@ -701,17 +711,42 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         phase = "zoom"; setMsg("A enquadrar a foto…", "ok"); ui()
     }
     private fun finishZoom() {
-        val sw = cam.srcW.toDouble(); val sh = cam.srcH.toDouble(); val w = min(sw, sh * ratio); val h = w / ratio
-        frame = RectD((sw - w) / 2, (sh - h) / 2, w, h)      // the photo is now the whole view (in the chosen format)
+        val sw = cam.srcW.toDouble(); val sh = cam.srcH.toDouble()
+        // where the frame should be after a perfect zoom about the centre
+        val k = targetZoom / zoomFrom; val f0 = frame ?: return
+        val ew = min(f0.w * k, min(sw, sh * ratio)); val eh = ew / ratio
+        val cx = sw / 2 + (f0.x + f0.w / 2 - sw / 2) * k; val cy = sh / 2 + (f0.y + f0.h / 2 - sh / 2) * k
+        frame = RectD(cl(cx - ew / 2, 0.0, sw - ew), cl(cy - eh / 2, 0.0, sh - eh), ew, eh)
         phase = "locked"; lockAt = SystemClock.uptimeMillis(); refAt = 0; refined = false
         lastMatch = "$lastMatch · sensor ${cam.lensNow()}"
-        setMsg("A afinar a composição…", "ok"); ui()
+        setMsg(tip.ifEmpty { "Pronto. Toca no obturador." }, "ok"); ui()
         val token = lockAt
-        pv.postDelayed({ if (phase == "locked" && lockAt == token) lifecycleScope.launch {
-            val ok = try { kotlinx.coroutines.withTimeoutOrNull(12000) { refineShot(token); true } } catch (e: Throwable) { android.util.Log.e("Enquadra", "refine", e); null }
-            android.util.Log.i("Enquadra", "refine done ok=$ok refined=$refined")
-            if (ok == null && phase == "locked" && lockAt == token) setMsg(tip.ifEmpty { "Pronto. Tira a foto." }, "ok")
-        } }, 250)
+        lifecycleScope.launch { relocate(token) }
+    }
+
+    /**
+     * After the zoom, find the frame's content again in the new picture (the hand moved, the lens changed)
+     * and put the frame exactly on it. This is what keeps the photo on the subject you aligned.
+     */
+    private suspend fun relocate(token: Long) {
+        val ref = zoomRef ?: return; val r0 = zoomRefFrame ?: return
+        kotlinx.coroutines.delay(200)                                  // let the last zoom step land
+        val g = hiGray(320) ?: return
+        if (phase != "locked" || lockAt != token) return
+        val sw = cam.srcW.toDouble(); val sh = cam.srcH.toDouble(); val kg = g.W / sw
+        val k = cam.zoom / zoomFrom
+        val ew = r0.w * k * kg; val eh = r0.h * k * kg
+        val ex = g.W / 2.0 + ((r0.x + r0.w / 2) * kg - g.W / 2.0) * k - ew / 2; val ey = g.H / 2.0 + ((r0.y + r0.h / 2) * kg - g.H / 2.0) * k - eh / 2
+        val TW = 40; val TH = max(16, (TW / ratio).roundToInt())
+        val loc = withContext(Dispatchers.Default) { locate(ref, TW, TH, g, ex, ey, ew, eh) }
+        if (phase != "locked" || lockAt != token) return
+        if (loc == null || loc.err > 28) { lastMatch = "$lastMatch · reencontro falhou (${loc?.err?.roundToInt() ?: -1})"; return }
+        var w = min(loc.w / kg, min(sw, sh * ratio)); var h = w / ratio
+        if (h > sh) { h = sh; w = h * ratio }
+        val ncx = (loc.x + loc.w / 2) / kg; val ncy = (loc.y + loc.h / 2) / kg
+        val nf = RectD(cl(ncx - w / 2, 0.0, sw - w), cl(ncy - h / 2, 0.0, sh - h), w, h)
+        refFrom = frame; refAt = SystemClock.uptimeMillis(); frame = nf
+        lastMatch = "$lastMatch · reencontrado (${"%.0f".format(loc.err)})"
     }
 
     // ---------- final touch: Gemini looks at the zoomed shot and adjusts the crop itself ----------
