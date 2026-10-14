@@ -641,7 +641,10 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         val zRaw = z0 * LENS_FILL / s0
                         // Gemini picked the lens (it was told each lens's frame size): keep its choice and its framing, only nudge it
                         val gl = plan0.lens?.let { l -> stops.firstOrNull { abs(it - l) < .05 } }
-                        val L = if (gl != null) fitLens(gl, stops, plan0.subj, z0, srcW, srcH) else pickLens(zRaw, stops, plan0.subj, z0, srcW, srcH)
+                        var L = if (gl != null) fitLens(gl, stops, plan0.subj, z0, srcW, srcH) else pickLens(zRaw, stops, plan0.subj, z0, srcW, srcH)
+                        // a small, distant subject that fits the 5x frame comfortably is shot at 5x, whatever lens Gemini said
+                        val sj0 = plan0.subj
+                        if (L < 4.9 && sj0 != null && stops.any { abs(it - 5) < .01 } && fits(sj0, 5.0, z0, srcW, srcH, .8)) L = 5.0
                         val s = (z0 * LENS_FILL / L).coerceIn(.06, 1.0)
                         lensTxt = "lente ${fmtZ(L)}" + (if (gl != null) (if (abs(gl - L) > .01) " (gemini ${fmtZ(gl)}, motivo grande)" else " (gemini)") else if (plan0.lens != null) " (gemini pediu ${plan0.lens})" else ""); targetZoom = L
                         val sh = plan0.shot
@@ -864,6 +867,13 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     cam.setZoom(homeZoom); lensOut.setTextColor(C.FG); lensOut.text = sb.toString() + "sensores: ${cam.physList}\ncâmara lógica:${cam.logicalFullRes}"
                 }
             }.apply { layoutParams = LinearLayout.LayoutParams(-2, -2) }, lensOut), lp(20))
+        val physOut = outText().apply { setTextIsSelectable(true) }
+        body.addView(field(lbl("Teste: tele 5× direta"), para("Tenta tirar uma foto diretamente do sensor 7 (a periscópica 5×), sem passar pelo zoom. A câmara desliga-se por um momento."),
+            btn("Testar sensor 7") {
+                physOut.setTextColor(C.MUTED); physOut.text = "A testar…"
+                val id = cam.physList.split(", ").maxByOrNull { Regex("≈(\\d+) mm").find(it)?.groupValues?.get(1)?.toIntOrNull() ?: 0 }?.substringBefore(" ")?.ifEmpty { null } ?: "7"
+                cam.testPhysical(this, pv, id, restore = { startCamera() }) { r -> physOut.setTextColor(C.FG); physOut.text = r + "\n(o sensor 6, a 3×, tem ≈66 mm; o 7 tem ≈113 mm)" }
+            }.apply { layoutParams = LinearLayout.LayoutParams(-2, -2) }, physOut), lp(20))
         body.addView(field(lbl("Diagnóstico"), diag, btn("Copiar diagnóstico") {
             (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("diag", diag.text)); diag.setTextColor(C.LOCK)
         }.apply { layoutParams = LinearLayout.LayoutParams(-2, -2) }), lp(20))

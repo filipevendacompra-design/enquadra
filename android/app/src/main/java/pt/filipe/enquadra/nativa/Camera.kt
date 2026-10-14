@@ -52,7 +52,7 @@ class Cam(private val ctx: Context) {
     fun info(): String {
         val c = capture?.resolutionInfo?.resolution; val a = analysis?.resolutionInfo?.resolution
         return "sensores: ${physList.ifEmpty { "?" }}\ncâmara lógica:$logicalFullRes\nagora: ${lensNow().ifEmpty { "?" }} a ${"%.1f".format(zoom)}×\n" +
-            (if (exactZoom) "zoom por frame: sim · " else "zoom por frame: não · ") + "foto ${c?.width ?: "?"}×${c?.height ?: "?"} · análise ${a?.width ?: "?"}×${a?.height ?: "?"} · zoom ${"%.2f".format(minZoom)}–${"%.1f".format(maxZoom)}" +
+            (if (exactZoom) "zoom por frame: sim · " else "zoom por frame: não ($zoomResults relatórios) · ") + "foto ${c?.width ?: "?"}×${c?.height ?: "?"} · análise ${a?.width ?: "?"}×${a?.height ?: "?"} · zoom ${"%.2f".format(minZoom)}–${"%.1f".format(maxZoom)}" +
             (if (tracker.anchorErr >= 0) " · âncora ${"%.0f".format(tracker.anchorErr)}" else "") +
             (if (lastError.isNotEmpty()) "\nerro: $lastError" else "")
     }
@@ -104,7 +104,8 @@ class Cam(private val ctx: Context) {
     }
 
     // ---- the real zoom of each frame, from the camera's own reports (frames lag the zoom command) ----
-    private val zoomAt = java.util.concurrent.ConcurrentHashMap<Long, Float>()
+    private val zoomAt = java.util.concurrent.ConcurrentSkipListMap<Long, Float>()
+    @Volatile var zoomResults = 0
     @Volatile var exactZoom = false
     @androidx.annotation.OptIn(markerClass = [androidx.camera.camera2.interop.ExperimentalCamera2Interop::class])
     private fun listenZoom(b: ImageAnalysis.Builder) {
@@ -114,12 +115,17 @@ class Cam(private val ctx: Context) {
                 res.get(android.hardware.camera2.CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)?.let { activePhys = it }
                 val ts = res.get(android.hardware.camera2.CaptureResult.SENSOR_TIMESTAMP) ?: return
                 val z = res.get(android.hardware.camera2.CaptureResult.CONTROL_ZOOM_RATIO) ?: return
-                zoomAt[ts] = z
-                if (zoomAt.size > 60) { val cut = ts - 2_000_000_000L; zoomAt.keys.removeIf { it < cut } }
+                zoomAt[ts] = z; zoomResults++
+                if (zoomAt.size > 90) zoomAt.headMap(ts - 2_000_000_000L).clear()
             }
         })
     }
-    private fun frameZoom(ts: Long): Float? = zoomAt[ts]
+    private fun frameZoom(ts: Long): Float? {
+        zoomAt[ts]?.let { return it }
+        val lo = zoomAt.floorEntry(ts); val hi = zoomAt.ceilingEntry(ts)
+        val best = listOfNotNull(lo, hi).minByOrNull { kotlin.math.abs(it.key - ts) } ?: return null
+        return if (kotlin.math.abs(best.key - ts) < 8_000_000L) best.value else null   // within 8 ms: same frame, other clock rounding
+    }
 
     // ---- which physical camera (sensor) is really in use: tells a true 5x lens from a crop of the 3x ----
     @Volatile var activePhys = ""
@@ -155,6 +161,43 @@ class Cam(private val ctx: Context) {
         return if (big != null) " (resolução total ${big.width}×${big.height})" else " (resolução total: sim)"
     }
     fun lensNow(): String = if (activePhys.isEmpty()) "" else "sensor $activePhys ${physDesc[activePhys] ?: ""}".trim()
+
+    /**
+     * Experiment: take one photo straight from a physical sensor (e.g. "7", the 5x periscope), bypassing the zoom.
+     * Rebinds the camera for the shot and restores it after. cb(text) gets what happened.
+     */
+    @androidx.annotation.OptIn(markerClass = [androidx.camera.camera2.interop.ExperimentalCamera2Interop::class])
+    fun testPhysical(owner: LifecycleOwner, pv: PreviewView, physId: String, restore: () -> Unit, cb: (String) -> Unit) {
+        val f = ProcessCameraProvider.getInstance(ctx)
+        f.addListener({
+            val provider = f.get()
+            try {
+                val vp = pv.viewPort ?: throw IllegalStateException("sem viewport")
+                val preview = Preview.Builder().build().also { it.setSurfaceProvider(pv.surfaceProvider) }
+                val cb2 = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY).setJpegQuality(95)
+                androidx.camera.camera2.interop.Camera2Interop.Extender(cb2).setPhysicalCameraId(physId)
+                val cap = cb2.build()
+                provider.unbindAll()
+                provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, UseCaseGroup.Builder().setViewPort(vp).addUseCase(preview).addUseCase(cap).build())
+                val t0 = System.currentTimeMillis()
+                cap.takePicture(shotExec, object : ImageCapture.OnImageCapturedCallback() {
+                    override fun onCaptureSuccess(image: ImageProxy) {
+                        var txt: String
+                        try {
+                            val bb = image.planes[0].buffer; bb.rewind(); val bytes = ByteArray(bb.remaining()); bb.get(bytes)
+                            val ex = android.media.ExifInterface(java.io.ByteArrayInputStream(bytes))
+                            val fl = ex.getAttributeDouble(android.media.ExifInterface.TAG_FOCAL_LENGTH, -1.0)
+                            val f35 = ex.getAttributeInt(android.media.ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM, -1)
+                            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }; BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
+                            txt = "sensor $physId: foto ${o.outWidth}×${o.outHeight}, focal ${"%.2f".format(fl)} mm" + (if (f35 > 0) " (≈$f35 mm)" else "") + ", ${System.currentTimeMillis() - t0} ms"
+                        } catch (e: Throwable) { txt = "sensor $physId: foto chegou mas não a li (${e.message})" } finally { image.close() }
+                        main.post { cb(txt); restore() }
+                    }
+                    override fun onError(exc: ImageCaptureException) { main.post { cb("sensor $physId: a câmara recusou (${exc.message})"); restore() } }
+                })
+            } catch (e: Throwable) { cb("sensor $physId: não foi possível ligar (${e.message})"); restore() }
+        }, ContextCompat.getMainExecutor(ctx))
+    }
 
     fun setZoom(z: Float, done: (() -> Unit)? = null) {
         val c = camera ?: run { done?.invoke(); return }
