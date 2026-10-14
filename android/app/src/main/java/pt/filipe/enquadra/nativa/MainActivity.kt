@@ -265,11 +265,20 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         if (mx <= mn) return emptyList()
         return listOf(mn, 1f, 2f, 3f, 5f).filter { it >= mn - 1e-6 && it <= mx + 1e-6 }.map { (it * 100).roundToInt() / 100f }.distinct().sorted()
     }
+    private fun fits(sj: Subj, L: Double, z0: Float, srcW: Double, srcH: Double, k: Double): Boolean {
+        val maxW = min(srcW, srcH * ratio); val fw = z0 * LENS_FILL / L * maxW / srcW; val fh = fw * srcW / ratio / srcH
+        return sj.box[2] <= fw * k && sj.box[3] <= fh * k
+    }
+    /** Gemini's lens, stepped down only if its own subject would not fit. */
+    private fun fitLens(L: Double, stops: List<Double>, sj: Subj?, z0: Float, srcW: Double, srcH: Double): Double {
+        if (sj == null) return L
+        return stops.filter { it <= L + 1e-3 }.sortedDescending().firstOrNull { fits(sj, it, z0, srcW, srcH, .95) } ?: stops.min()
+    }
     /** 3x unless the subject asks for 5x, or would not fit in a 3x frame (then 1x). */
     private fun pickLens(zRaw: Double, stops: List<Double>, sj: Subj?, z0: Float, srcW: Double, srcH: Double): Double {
         val has3 = stops.any { abs(it - 3) < .01 }; val has5 = stops.any { abs(it - 5) < .01 }
         if (!has3) return stops.minByOrNull { abs(ln(it / zRaw)) }!!
-        if (has5 && zRaw > 4.2) return 5.0
+        if (has5 && (zRaw > 4.2 || (sj != null && fits(sj, 5.0, z0, srcW, srcH, .75)))) return 5.0
         if (sj != null) {
             val maxW = min(srcW, srcH * ratio); val fw = z0 * LENS_FILL / 3.0 * maxW / srcW; val fh = fw * srcW / ratio / srcH
             if (sj.box[2] > fw * .95 || sj.box[3] > fh * .95) return 1.0
@@ -567,7 +576,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         cam.trackOn = true; ui(); setMsg("A procurar a foto…", "")
         lifecycleScope.launch {
             try {
-                val snap = snapshot(1024) ?: throw GErr("no_frame")
+                val snap = snapshot(1280) ?: throw GErr("no_frame")
                 val srcW = cam.srcW.toDouble(); val srcH = cam.srcH.toDouble()
                 val t0 = SystemClock.uptimeMillis()
                 val eng = gem.engine(); var pl: Plan? = null; var who = ""
@@ -577,7 +586,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     else if (gem.state == "down" || gem.state == "badkey") note = if (gem.state == "down") "Gemini em baixo." else "Chave do Gemini inválida."
                     else {
                         val b64 = withContext(Dispatchers.Default) { val o = ByteArrayOutputStream(); snap.compress(Bitmap.CompressFormat.JPEG, 85, o); Base64.encodeToString(o.toByteArray(), Base64.NO_WRAP) }
-                        val prompt = gem.prompt(snap.width, snap.height, ratio, seen); var last: Throwable = GErr("g_paused"); var q = 0; var n = 0
+                        val lensSizes = lensStops().map { L -> L to (cam.zoom * LENS_FILL / L * min(srcW, srcH * ratio) / srcW) }.filter { it.second < .95 }
+                        val prompt = gem.prompt(snap.width, snap.height, ratio, seen, lensSizes); var last: Throwable = GErr("g_paused"); var q = 0; var n = 0
                         for (m in gem.modelOrder()) {
                             if (gem.pausedNow(m)) { last = GErr("g_paused"); continue }
                             n++
@@ -608,10 +618,14 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     if (cr != null && stops.isNotEmpty()) {
                         val maxH = min(F.H.toDouble(), F.W / ratio); val s0 = cr.ch / maxH
                         val zRaw = z0 * LENS_FILL / s0
-                        val L = pickLens(zRaw, stops, plan0.subj, z0, srcW, srcH)
+                        // Gemini picked the lens (it was told each lens's frame size): keep its choice and its framing, only nudge it
+                        val gl = plan0.lens?.let { l -> stops.firstOrNull { abs(it - l) < .05 } }
+                        val L = if (gl != null) fitLens(gl, stops, plan0.subj, z0, srcW, srcH) else pickLens(zRaw, stops, plan0.subj, z0, srcW, srcH)
                         val s = (z0 * LENS_FILL / L).coerceIn(.06, 1.0)
-                        lensTxt = "lente ${fmtZ(L)}"; targetZoom = L
-                        if (abs(s / s0 - 1) > .03) cr = bestCrop(F, plan0.subj, ratio, plan0.rule, CropOpt(listOf(s), cr.x0 + cr.cw / 2.0, cr.y0 + cr.ch / 2.0, .06)) ?: cr
+                        lensTxt = "lente ${fmtZ(L)}" + (if (gl != null) " (gemini)" else ""); targetZoom = L
+                        val sh = plan0.shot
+                        if (gl != null && sh != null) cr = bestCrop(F, plan0.subj, ratio, plan0.rule, CropOpt(listOf(s), (sh.x + sh.w / 2) * F.W, (sh.y + sh.h / 2) * F.H, .03)) ?: cr
+                        else if (abs(s / s0 - 1) > .03) cr = bestCrop(F, plan0.subj, ratio, plan0.rule, CropOpt(listOf(s), cr.x0 + cr.cw / 2.0, cr.y0 + cr.ch / 2.0, .06)) ?: cr
                     }
                     cr?.let { toFrame(it, F, srcW, srcH, ratio) }
                 } ?: throw GErr("no_crop")
@@ -621,6 +635,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 plan = plan0; subj = plan0.subj; style = plan0.rule; tip = plan0.tip.ifEmpty { LOCAL_TIP[plan0.rule] ?: "" }
                 label = plan0.name.ifEmpty { plan0.subj?.name ?: "" }
                 frame = c; zS = cam.zoom.toDouble(); lastCmd = zS; guideDist0 = 0f
+                cam.tracker.setAnchor(c.x / srcW, c.y / srcH, c.w / srcW, c.h / srcH)
                 seen.add(label.ifEmpty { "zona ${c.x.roundToInt()},${c.y.roundToInt()}" })
                 phase = "guide"
             } catch (e: Throwable) { phase = "idle"; cam.trackOn = false; setMsg(errCopy(e), "err") }

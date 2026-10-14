@@ -62,6 +62,34 @@ class Tracker {
     @Volatile var S = 1.0
     @Volatile var lastScale = 1.0
 
+    // ---- anchor: the frame's own content, cut from the frame the AI saw; re-found every few frames so small errors never add up ----
+    @Volatile var refHi: Gray? = null
+    private class Anchor(val t: FloatArray, val TW: Int, val TH: Int, val rx: Double, val ry: Double, val rw: Double, val rh: Double)
+    @Volatile private var anchor: Anchor? = null
+    @Volatile var anchorErr = -1.0
+    /** r*: the frame in the reference view, as fractions of its width/height */
+    fun setAnchor(rx: Double, ry: Double, rw: Double, rh: Double) {
+        val g = refHi ?: return
+        val TW = 32; val TH = max(12, (TW * rh * g.H / (rw * g.W)).roundToInt())
+        anchor = Anchor(sampleGray(g, rx * g.W, ry * g.H, rw * g.W, rh * g.H, TW, TH), TW, TH, rx, ry, rw, rh)
+    }
+    fun clearAnchor() { anchor = null; anchorErr = -1.0 }
+    val hasAnchor get() = anchor != null
+
+    /** hi: a grey of the current view (any width). Pulls the tracked position onto where the frame's content really is. */
+    fun correct(hi: Gray) {
+        val a = anchor ?: return; val p = prev ?: return
+        val kq = hi.W.toDouble() / p.W
+        val cx = hi.W / 2.0; val cy = hi.H / 2.0
+        val ew = a.rw * hi.W * S; val eh = a.rh * hi.H * S
+        val ex = cx + (a.rx * hi.W - cx) * S + dx * kq; val ey = cy + (a.ry * hi.H - cy) * S + dy * kq
+        val loc = locateNear(a.t, a.TW, a.TH, hi, ex, ey, ew, eh) ?: return
+        anchorErr = loc.err
+        if (loc.err > 24) return
+        val tdx = (loc.x - cx - (a.rx * hi.W - cx) * S) / kq; val tdy = (loc.y - cy - (a.ry * hi.H - cy) * S) / kq
+        dx += (tdx - dx) * .6; dy += (tdy - dy) * .6
+    }
+
     /** prev resampled as if zoomed by s about the centre */
     private fun warp(a: Gray, s: Double): Gray {
         val g = FloatArray(a.W * a.H); val cx = a.W / 2.0; val cy = a.H / 2.0
@@ -155,6 +183,22 @@ fun sampleGray(src: Gray, x: Double, y: Double, w: Double, h: Double, TW: Int, T
 }
 
 private fun mad(a: FloatArray, b: FloatArray): Double { var e = 0.0; for (i in a.indices) e += abs(a[i] - b[i]); return e / a.size }
+
+/** Small search around where the frame should be: ±30% of its size, same scale (the zoom is known). */
+fun locateNear(ref: FloatArray, TW: Int, TH: Int, cur: Gray, ex: Double, ey: Double, ew: Double, eh: Double): Located? {
+    var best: Located? = null
+    fun test(x: Double, y: Double) {
+        if (x < -1 || y < -1 || x + ew > cur.W + 1 || y + eh > cur.H + 1) return
+        val e = mad(ref, sampleGray(cur, x, y, ew, eh, TW, TH))
+        if (best == null || e < best!!.err) best = Located(x, y, ew, eh, e)
+    }
+    val st = ew * .3 / 6
+    for (j in -6..6) for (i in -6..6) test(ex + i * st, ey + j * st)
+    val b0 = best ?: return null
+    val s2 = st / 4
+    for (j in -4..4) for (i in -4..4) test(b0.x + i * s2, b0.y + j * s2)
+    return best
+}
 
 fun locate(ref: FloatArray, TW: Int, TH: Int, cur: Gray, ex: Double, ey: Double, ew: Double, eh: Double): Located? {
     // ex,ey,ew,eh: where the frame should be if the lenses were perfectly aligned

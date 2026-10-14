@@ -81,20 +81,31 @@ class Gemini(private val set: Settings) {
     fun engine() = if (set.engine == "local") "local" else if (set.gkey.isNotEmpty()) "gemini" else "local"
     fun pausedNow(m: String) = System.currentTimeMillis() < (paused[m] ?: 0)
 
-    fun prompt(w: Int, h: Int, ratio: Double, seen: List<String>): String {
+    /** lenses: (zoom, frame width as a fraction of the image width) for each real lens the photo can be taken with */
+    fun prompt(w: Int, h: Int, ratio: Double, seen: List<String>, lenses: List<Pair<Double, Double>> = emptyList()): String {
+        val lensField = if (lenses.isNotEmpty()) ",\"lens\":" + lenses.joinToString("|") { fmtLens(it.first) } else ""
         val avoid = if (seen.isNotEmpty()) "\nThe user asked for another option: choose something different from ${seen.takeLast(4).joinToString(", ") { "\"$it\"" }}." else ""
         val p = persona()
         val extra = if (set.extra.isNotEmpty()) "\nThe photographer's own direction (follow it): ${set.extra.take(400)}" else ""
         return """You are a photo director helping someone take a striking phone photo. The image is the live camera view through the ultra-wide lens (${if (w > h) "landscape" else "portrait"}, ${w}x${h}).
 ${p.text}$extra
 Pick ONE subject in it that would make the most beautiful photo when isolated with a telephoto lens (about 3x to 5x from this wide view). Favour: light (sun, golden light, glowing windows, light through leaves), reflections, silhouettes, strong shapes, one isolated object, textures, leading lines that end in something. Avoid: things cut by the image edge, clutter, plain empty sky. Never pick a lamp, street light or light bulb as the subject; choose what the light falls on, its glow on a surface, or its reflection, and keep bright lamps away from the edges of the shot. The sun at sunset is fine.
-Then propose the shot: a rectangle with width:height = ${"%.3f".format(java.util.Locale.US, ratio)} that contains the subject, places it with a composition rule, and covers roughly ${p.cover} of the image width. Leave space in front of people or animals in the direction they look or move.
+Then propose the shot: a rectangle with width:height = ${"%.3f".format(java.util.Locale.US, ratio)} that contains the subject and places it with a composition rule. ${lensText(lenses, p.cover)} Leave space in front of people or animals in the direction they look or move.
 Finally choose the look of the finished photo to match the mood of that shot (do not default to the same every time):
 filter, one of: clean (natural), vivo (punchy colour), quente (warm), claro (bright and airy), suave (soft, faded), pelicula (film with grain), dourado (golden glow), cinema (teal and orange, vignette), porto (crisp, clean contrast), dusk (warm evening), relic (vintage), lofi (high contrast, saturated), pb (black and white), noir (dramatic black and white).
 border, one of: none, white (thin white), ficha (white with camera specs), polaroid (instant photo with handwritten caption), galeria (museum mat), pelicula (film frame), desfocado (blurred square backdrop), paper (cream paper with caption), date (orange date stamp).$avoid
 Answer with JSON only:
-{"subject":"short description in European Portuguese, max 4 words, lowercase","subject_box":[ymin,xmin,ymax,xmax],"shot_box":[ymin,xmin,ymax,xmax],"rule":"tercos|aurea|centro|simetrico|diagonal|minimal|moldura","tip":"short instruction in European Portuguese, max 6 words, e.g. 'Luz bonita, fica aí'","filter":"one id from the list","border":"one id from the list"}
+{"subject":"short description in European Portuguese, max 4 words, lowercase","subject_box":[ymin,xmin,ymax,xmax],"shot_box":[ymin,xmin,ymax,xmax],"rule":"tercos|aurea|centro|simetrico|diagonal|minimal|moldura","tip":"short instruction in European Portuguese, max 6 words, e.g. 'Luz bonita, fica aí'","filter":"one id from the list","border":"one id from the list"$lensField}
 Coordinates are integers normalized to 0-1000."""
+    }
+
+    private fun fmtLens(z: Double) = if (kotlin.math.abs(z - Math.round(z)) < .05) Math.round(z).toString() else "%.1f".format(java.util.Locale.US, z)
+    private fun lensText(lenses: List<Pair<Double, Double>>, cover: String): String {
+        if (lenses.isEmpty()) return "It covers roughly $cover of the image width."
+        val opts = lenses.joinToString("; ") { (z, f) -> "lens ${fmtLens(z)} = the shot is ${Math.round(f * 100)}% of the image width" }
+        return "The photo will be taken with one of the phone's real lenses, and each lens gives a fixed shot size: $opts. " +
+            "Choose the lens whose size isolates the subject best (a tight, telephoto look is usually the most beautiful; use a wider lens only when the subject would not fit), " +
+            "and make shot_box exactly that size."
     }
 
     /** Models to try: the one known to work first, then the chosen one, then the rest. */
@@ -200,7 +211,8 @@ fun fromAI(res: JSONObject): Plan {
     val rule = res.optString("rule").let { if (it in STYLE_IDS) it else "tercos" }
     val filter = res.optString("filter").takeIf { it in FILTER_IDS }
     val border = res.optString("border").takeIf { it in BORDER_IDS }
-    return Plan(subj, shot, rule, res.optString("tip", "").take(60), filter, border, subj.name)
+    val lens = res.optDouble("lens", Double.NaN).takeIf { !it.isNaN() && it > 0 }
+    return Plan(subj, shot, rule, res.optString("tip", "").take(60), filter, border, subj.name, lens)
 }
 
 fun errCopy(e: Throwable): String {

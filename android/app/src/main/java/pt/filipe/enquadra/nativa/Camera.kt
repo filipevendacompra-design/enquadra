@@ -52,6 +52,7 @@ class Cam(private val ctx: Context) {
     fun info(): String {
         val c = capture?.resolutionInfo?.resolution; val a = analysis?.resolutionInfo?.resolution
         return (if (exactZoom) "zoom por frame: sim · " else "zoom por frame: não · ") + "foto ${c?.width ?: "?"}×${c?.height ?: "?"} · análise ${a?.width ?: "?"}×${a?.height ?: "?"} · zoom ${"%.2f".format(minZoom)}–${"%.1f".format(maxZoom)}" +
+            (if (tracker.anchorErr >= 0) " · âncora ${"%.0f".format(tracker.anchorErr)}" else "") +
             (if (lastError.isNotEmpty()) "\nerro: $lastError" else "")
     }
 
@@ -133,6 +134,7 @@ class Cam(private val ctx: Context) {
     private var zPrevFrame = 0.0
     private var zRef = 0.0
     private var zPrevExact = false
+    private var anchorTick = 0
 
     private fun onFrame(img: ImageProxy) {
         val crop = img.cropRect; val rot = img.imageInfo.rotationDegrees
@@ -150,9 +152,13 @@ class Cam(private val ctx: Context) {
             val fz = frameZoom(img.imageInfo.timestamp)
             exactZoom = fz != null
             val zNow = (fz ?: zoom).toDouble()
-            if (sn != null || tracker.resetPending) { tracker.reset(); zRef = zNow }   // tracking starts from the frame the AI sees
+            if (sn != null || tracker.resetPending) {   // tracking starts from the frame the AI sees
+                tracker.reset(); zRef = zNow; tracker.clearAnchor()
+                tracker.refHi = yGray(crop, rot, upW, upH, rs, ps, 256)
+            }
             tracker.step(g, if (zPrevFrame > 0) zNow / zPrevFrame else 1.0, if (zRef > 0) zNow / zRef else 1.0, fz != null)
-            zPrevFrame = zNow; zPrevExact = fz != null
+            zPrevFrame = zNow
+            if (tracker.hasAnchor && (++anchorTick % 3 == 0)) tracker.correct(yGray(crop, rot, upW, upH, rs, ps, 256)); zPrevExact = fz != null
         }
         if (hg != null) { val g = yGray(crop, rot, upW, upH, rs, ps, hg.first); main.post { hg.second(g) } }
         if (sn != null) {

@@ -19,7 +19,7 @@ private fun jsRound(v: Double) = floor(v + 0.5).toInt()   // Math.round
 
 class Subj(val name: String, val cls: String?, val w: Double, val box: DoubleArray, val focus: DoubleArray, val facing: String = "none")
 class Shot(val x: Double, val y: Double, val w: Double, val h: Double)
-class Plan(var subj: Subj?, var shot: Shot?, var rule: String, var tip: String, var filter: String? = null, var border: String? = null, var name: String = "")
+class Plan(var subj: Subj?, var shot: Shot?, var rule: String, var tip: String, var filter: String? = null, var border: String? = null, var name: String = "", var lens: Double? = null)
 data class RectD(val x: Double, val y: Double, val w: Double, val h: Double)
 class Crop(val x0: Int, val y0: Int, val cw: Int, val ch: Int)
 
