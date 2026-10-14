@@ -272,7 +272,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     /** Gemini's lens, stepped down only if its own subject would not fit. */
     private fun fitLens(L: Double, stops: List<Double>, sj: Subj?, z0: Float, srcW: Double, srcH: Double): Double {
         if (sj == null) return L
-        return stops.filter { it <= L + 1e-3 }.sortedDescending().firstOrNull { fits(sj, it, z0, srcW, srcH, .95) } ?: stops.min()
+        // Gemini knew the frame sizes when it chose; its subject box is loose, so only step down when it is clearly too big
+        return stops.filter { it <= L + 1e-3 }.sortedDescending().firstOrNull { fits(sj, it, z0, srcW, srcH, 1.35) } ?: stops.min()
     }
     /** 3x unless the subject asks for 5x, or would not fit in a 3x frame (then 1x). */
     private fun pickLens(zRaw: Double, stops: List<Double>, sj: Subj?, z0: Float, srcW: Double, srcH: Double): Double {
@@ -622,7 +623,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         val gl = plan0.lens?.let { l -> stops.firstOrNull { abs(it - l) < .05 } }
                         val L = if (gl != null) fitLens(gl, stops, plan0.subj, z0, srcW, srcH) else pickLens(zRaw, stops, plan0.subj, z0, srcW, srcH)
                         val s = (z0 * LENS_FILL / L).coerceIn(.06, 1.0)
-                        lensTxt = "lente ${fmtZ(L)}" + (if (gl != null) " (gemini)" else ""); targetZoom = L
+                        lensTxt = "lente ${fmtZ(L)}" + (if (gl != null) (if (abs(gl - L) > .01) " (gemini ${fmtZ(gl)}, motivo grande)" else " (gemini)") else if (plan0.lens != null) " (gemini pediu ${plan0.lens})" else ""); targetZoom = L
                         val sh = plan0.shot
                         if (gl != null && sh != null) cr = bestCrop(F, plan0.subj, ratio, plan0.rule, CropOpt(listOf(s), (sh.x + sh.w / 2) * F.W, (sh.y + sh.h / 2) * F.H, .03)) ?: cr
                         else if (abs(s / s0 - 1) > .03) cr = bestCrop(F, plan0.subj, ratio, plan0.rule, CropOpt(listOf(s), cr.x0 + cr.cw / 2.0, cr.y0 + cr.ch / 2.0, .06)) ?: cr
@@ -681,7 +682,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             val pl = plan
             if (mode == "live") { phase = "idle"; frame = null; cam.trackOn = false; resetView(); setMsg("Aponta e toca em ✦ para encontrar a foto.", "dim") }
             ui()
-            openResult(photo.bmp, info + " · ${photo.ms} ms", pl)
+            openResult(photo.bmp, info + " · ${photo.ms} ms" + cam.lensNow().let { if (it.isNotEmpty()) " · $it" else "" }, pl)
         }
     }
 

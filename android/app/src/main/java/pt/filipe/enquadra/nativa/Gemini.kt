@@ -104,7 +104,7 @@ Coordinates are integers normalized to 0-1000."""
         if (lenses.isEmpty()) return "It covers roughly $cover of the image width."
         val opts = lenses.joinToString("; ") { (z, f) -> "lens ${fmtLens(z)} = the shot is ${Math.round(f * 100)}% of the image width" }
         return "The photo will be taken with one of the phone's real lenses, and each lens gives a fixed shot size: $opts. " +
-            "Choose the lens whose size isolates the subject best (a tight, telephoto look is usually the most beautiful; use a wider lens only when the subject would not fit), " +
+            "Choose the longest lens in which the subject still fits with a little space around it: a tight telephoto look is usually the most beautiful, and distant subjects call for the longest lens. Use a wider lens only when the subject would not fit. " +
             "and make shot_box exactly that size."
     }
 

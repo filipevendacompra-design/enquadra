@@ -51,7 +51,8 @@ class Cam(private val ctx: Context) {
 
     fun info(): String {
         val c = capture?.resolutionInfo?.resolution; val a = analysis?.resolutionInfo?.resolution
-        return (if (exactZoom) "zoom por frame: sim · " else "zoom por frame: não · ") + "foto ${c?.width ?: "?"}×${c?.height ?: "?"} · análise ${a?.width ?: "?"}×${a?.height ?: "?"} · zoom ${"%.2f".format(minZoom)}–${"%.1f".format(maxZoom)}" +
+        return "sensores: ${physList.ifEmpty { "?" }}\nagora: ${lensNow().ifEmpty { "?" }} a ${"%.1f".format(zoom)}×\n" +
+            (if (exactZoom) "zoom por frame: sim · " else "zoom por frame: não · ") + "foto ${c?.width ?: "?"}×${c?.height ?: "?"} · análise ${a?.width ?: "?"}×${a?.height ?: "?"} · zoom ${"%.2f".format(minZoom)}–${"%.1f".format(maxZoom)}" +
             (if (tracker.anchorErr >= 0) " · âncora ${"%.0f".format(tracker.anchorErr)}" else "") +
             (if (lastError.isNotEmpty()) "\nerro: $lastError" else "")
     }
@@ -96,6 +97,7 @@ class Cam(private val ctx: Context) {
                 }
                 if (capture == null) capture = cap
                 analysis = an
+                loadPhysical()
                 onReady()
             } catch (e: Throwable) { lastError = e.message ?: e.toString(); onFail(lastError) }
         }, ContextCompat.getMainExecutor(ctx))
@@ -109,6 +111,7 @@ class Cam(private val ctx: Context) {
         if (android.os.Build.VERSION.SDK_INT < 30) return
         androidx.camera.camera2.interop.Camera2Interop.Extender(b).setSessionCaptureCallback(object : android.hardware.camera2.CameraCaptureSession.CaptureCallback() {
             override fun onCaptureCompleted(s: android.hardware.camera2.CameraCaptureSession, r: android.hardware.camera2.CaptureRequest, res: android.hardware.camera2.TotalCaptureResult) {
+                res.get(android.hardware.camera2.CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)?.let { activePhys = it }
                 val ts = res.get(android.hardware.camera2.CaptureResult.SENSOR_TIMESTAMP) ?: return
                 val z = res.get(android.hardware.camera2.CaptureResult.CONTROL_ZOOM_RATIO) ?: return
                 zoomAt[ts] = z
@@ -117,6 +120,29 @@ class Cam(private val ctx: Context) {
         })
     }
     private fun frameZoom(ts: Long): Float? = zoomAt[ts]
+
+    // ---- which physical camera (sensor) is really in use: tells a true 5x lens from a crop of the 3x ----
+    @Volatile var activePhys = ""
+    private val physDesc = HashMap<String, String>()
+    @androidx.annotation.OptIn(markerClass = [androidx.camera.camera2.interop.ExperimentalCamera2Interop::class])
+    private fun loadPhysical() {
+        try {
+            val id = androidx.camera.camera2.interop.Camera2CameraInfo.from(camera!!.cameraInfo).cameraId
+            val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
+            val ids = cm.getCameraCharacteristics(id).physicalCameraIds
+            for (p in ids) {
+                val ch = cm.getCameraCharacteristics(p)
+                val f = ch.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: continue
+                val sz = ch.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+                val eq = if (sz != null) (f * 43.27 / Math.hypot(sz.width.toDouble(), sz.height.toDouble())).roundToInt() else 0
+                val px = ch.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
+                physDesc[p] = "≈${eq} mm" + (if (px != null) " ${"%.0f".format(px.width * px.height / 1e6)} MP" else "")
+            }
+            physList = ids.sortedBy { physDesc[it] ?: "" }.joinToString(", ") { "$it ${physDesc[it]}" }
+        } catch (e: Throwable) { physList = "?" }
+    }
+    var physList = ""; private set
+    fun lensNow(): String = if (activePhys.isEmpty()) "" else "sensor $activePhys ${physDesc[activePhys] ?: ""}".trim()
 
     fun setZoom(z: Float, done: (() -> Unit)? = null) {
         val c = camera ?: run { done?.invoke(); return }
