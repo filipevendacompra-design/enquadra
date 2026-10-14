@@ -100,6 +100,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cp android/app/build/outputs/apk/debug/app-debug.apk enquadra-nativa.apk
+          gh release delete nativa --cleanup-tag -y 2>/dev/null || true   # old name, clashed with the branch
           V=$(grep -m1 'versionName' android/app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')
           gh release view apk >/dev/null 2>&1 || gh release create apk --prerelease --target "${{ github.sha }}" --title "Enquadra nativa" --notes "APK de teste"
           gh release upload apk enquadra-nativa.apk --clobber
