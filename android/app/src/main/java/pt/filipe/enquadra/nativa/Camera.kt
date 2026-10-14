@@ -313,7 +313,7 @@ class Cam(private val ctx: Context) {
                     val parts = ArrayList<String>()
                     ex?.getAttributeDouble(android.media.ExifInterface.TAG_F_NUMBER, 0.0)?.takeIf { it > 0 }?.let { parts.add("f/" + "%.1f".format(java.util.Locale.US, it).removeSuffix(".0")) }
                     ex?.getAttributeDouble(android.media.ExifInterface.TAG_EXPOSURE_TIME, 0.0)?.takeIf { it > 0 }?.let { parts.add(if (it >= 1) "%.1fs".format(java.util.Locale.US, it) else "1/${(1 / it).roundToInt()}s") }
-                    ex?.getAttributeInt(android.media.ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY, 0)?.takeIf { it > 0 }?.let { parts.add("ISO $it") }
+                    ex?.getAttributeInt(android.media.ExifInterface.TAG_ISO_SPEED_RATINGS, 0)?.takeIf { it > 0 }?.let { parts.add("ISO $it") }
                     res = Photo(out, if (rot % 180 == 0) jw else jh, if (rot % 180 == 0) jh else jw, System.currentTimeMillis() - t0, parts.joinToString("  "))
                 } catch (e: Throwable) { why = e.message ?: e.toString() } finally { image.close() }
                 val rr = res; val w = why; main.post { cb(rr, w) }
