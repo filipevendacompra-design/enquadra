@@ -7,6 +7,9 @@ on:
       - "android/**"
       - ".github/workflows/nativa.yml"
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -90,3 +93,15 @@ jobs:
         with:
           name: enquadra-nativa
           path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publicar o APK para descarregar no telemóvel
+        if: always() && steps.compilar.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk enquadra-nativa.apk
+          V=$(grep -m1 'versionName' android/app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')
+          gh release view nativa >/dev/null 2>&1 || gh release create nativa --prerelease --target "${{ github.sha }}" --title "Enquadra nativa" --notes "APK de teste"
+          gh release upload nativa enquadra-nativa.apk --clobber
+          gh release edit nativa --title "Enquadra nativa $V" --notes "Versão $V · $(date -u +'%Y-%m-%d %H:%M') UTC. Abre no telemóvel e carrega em enquadra-nativa.apk."
+          echo "Descarregar: https://github.com/${{ github.repository }}/releases/download/nativa/enquadra-nativa.apk" >> "$GITHUB_STEP_SUMMARY"
