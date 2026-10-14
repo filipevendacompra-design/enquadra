@@ -119,9 +119,12 @@ fun render(src: Bitmap, filterId: String, border: String, info: ShotInfo): Bitma
     when (border) {
         "ficha" -> {
             val mid = by + pb / 2f; val gap = m * .022f
-            o.drawText(info.cam, pl.toFloat(), mid - gap * .2f, paint(F.uiSemi, m * .042f, c("#141414")))
-            o.drawText(info.lens, pl.toFloat(), mid + gap * 1.25f, paint(F.ui, m * .029f, c("#8a877f")))
             val ps = paint(F.monoMed, m * .031f, c("#141414"), Paint.Align.RIGHT)
+            // the left block must end before the mark and the settings on the right
+            val room = W - ps.measureText(info.settings) - m * .14f
+            fun fit(p: Paint, t: String) { val w = p.measureText(t); if (w > room && room > 0) p.textSize *= room / w }
+            val pc = paint(F.uiSemi, m * .042f, c("#141414")); fit(pc, info.cam); o.drawText(info.cam, pl.toFloat(), mid - gap * .2f, pc)
+            val plz = paint(F.ui, m * .029f, c("#8a877f")); fit(plz, info.lens); o.drawText(info.lens, pl.toFloat(), mid + gap * 1.25f, plz)
             o.drawText(info.settings, (pl + W).toFloat(), mid - gap * .2f, ps)
             o.drawText(info.date, (pl + W).toFloat(), mid + gap * 1.25f, paint(F.mono, m * .024f, c("#8a877f"), Paint.Align.RIGHT))
             val sw = ps.measureText(info.settings); val xd = pl + W - sw - m * .035f
