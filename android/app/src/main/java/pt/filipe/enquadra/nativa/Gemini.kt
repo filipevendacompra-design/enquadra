@@ -95,7 +95,7 @@ Finally choose the look of the finished photo to match the mood of that shot (do
 filter, one of: clean (natural), vivo (punchy colour), quente (warm), claro (bright and airy), suave (soft, faded), pelicula (film with grain), dourado (golden glow), cinema (teal and orange, vignette), porto (crisp, clean contrast), dusk (warm evening), relic (vintage), lofi (high contrast, saturated), pb (black and white), noir (dramatic black and white).
 border, one of: none, white (thin white), ficha (white with camera specs), polaroid (instant photo with handwritten caption), galeria (museum mat), pelicula (film frame), desfocado (blurred square backdrop), paper (cream paper with caption), date (orange date stamp).$avoid
 Answer with JSON only:
-{"subject":"short description in European Portuguese, max 4 words, lowercase","subject_box":[ymin,xmin,ymax,xmax],"shot_box":[ymin,xmin,ymax,xmax],"rule":"tercos|aurea|centro|simetrico|diagonal|minimal|moldura","tip":"short instruction in European Portuguese, max 6 words, e.g. 'Luz bonita, fica aí'","filter":"one id from the list","border":"one id from the list"$lensField}
+{"subject":"short description in European Portuguese, max 4 words, lowercase","subject_box":[ymin,xmin,ymax,xmax],"shot_box":[ymin,xmin,ymax,xmax],"rule":"tercos|aurea|centro|simetrico|diagonal|minimal|moldura","tip":"one short, plain instruction in European Portuguese that a beginner understands: what to do with the phone or when to shoot, max 6 words, no photography jargon (never words like simetria, terços, regra, composição, enquadra), e.g. 'Fica parado e dispara' or 'Espera que a pessoa passe'","filter":"one id from the list","border":"one id from the list"$lensField}
 Coordinates are integers normalized to 0-1000."""
     }
 
@@ -106,6 +106,17 @@ Coordinates are integers normalized to 0-1000."""
         return "The photo will be taken with one of the phone's real lenses, and each lens gives a fixed shot size: $opts. " +
             "Choose the longest lens in which the subject still fits with a little space around it: a tight telephoto look is usually the most beautiful, and distant subjects call for the longest lens. Use a wider lens only when the subject would not fit. " +
             "and make shot_box exactly that size."
+    }
+
+    /** Second look, after the zoom: Gemini sees the shot itself and makes the final composition adjustment. */
+    fun refinePrompt(w: Int, h: Int, ratio: Double, subject: String): String {
+        val extra = if (set.extra.isNotEmpty()) "\nThe photographer's own direction (follow it): ${set.extra.take(400)}" else ""
+        return """You are a photo director. This image is the phone's zoomed-in view, about to be photographed (${w}x${h}). The subject is: "$subject".
+${persona().text}$extra
+Make the final composition adjustment yourself: choose the best final crop inside this image, a rectangle with width:height = ${"%.3f".format(java.util.Locale.US, ratio)}, at least 80% of the largest such rectangle (small adjustments only). Place the subject well, keep the horizon level-looking, remove distracting edges and anything cut awkwardly at the borders. If the current full view is already best, return it.
+Then give one short tip for a beginner in European Portuguese (max 6 words, no photography jargon such as simetria, terços, regra, composição): what to do now, e.g. "Fica parado e dispara" or "Espera pela onda".
+Answer with JSON only: {"shot_box":[ymin,xmin,ymax,xmax],"tip":"..."}
+Coordinates are integers normalized to 0-1000."""
     }
 
     /** Models to try: the one known to work first, then the chosen one, then the rest. */

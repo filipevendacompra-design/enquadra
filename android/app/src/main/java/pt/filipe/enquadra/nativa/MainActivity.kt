@@ -396,7 +396,12 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             for (i in 1..2) { cv.drawLine(L.VW * i / 3, 0f, L.VW * i / 3, L.VH, pLine); cv.drawLine(0f, L.VH * i / 3, L.VW, L.VH * i / 3, pLine) } }
         val camZoom = cam.zoom
         val f = if (phase == "zoom") frame?.let { fr -> val k = zoomNow / zoomFrom; val ccx = cam.srcW / 2.0; val ccy = cam.srcH / 2.0
-            RectD(ccx + (fr.x - ccx) * k, ccy + (fr.y - ccy) * k, fr.w * k, fr.h * k) } else curFrame()
+            RectD(ccx + (fr.x - ccx) * k, ccy + (fr.y - ccy) * k, fr.w * k, fr.h * k) }
+            else if (phase == "locked" && refAt > 0 && refFrom != null) frame?.let { fr -> val a = refFrom!!
+                val t = ((SystemClock.uptimeMillis() - refAt) / 450.0).coerceIn(0.0, 1.0); val e = if (t < .5) 2 * t * t else 1 - (-2 * t + 2).pow(2) / 2
+                if (t >= 1) { refAt = 0; refFrom = null }
+                RectD(a.x + (fr.x - a.x) * e, a.y + (fr.y - a.y) * e, a.w + (fr.w - a.w) * e, a.h + (fr.h - a.h) * e) }
+            else curFrame()
         var aligned = false
         if (f != null) {
             var fx = L.ox + f.x.toFloat() * L.s; var fy = L.oy + f.y.toFloat() * L.s; var fw = f.w.toFloat() * L.s; var fh = f.h.toFloat() * L.s
@@ -417,7 +422,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     ease = e; frameA = 1 - (t / .45f).coerceAtMost(1f)
                     if (t >= 1f) finishZoom()
                 }
-                "locked" -> if (mode != "photo") { ease = 1f; frameA = 0f }
+                "locked" -> if (mode != "photo") { ease = 1f; frameA = if (refined) 1f else 0f }
             }
             effZoom = camZoom.toDouble()
             val effR = (effZoom * 10).roundToInt()
@@ -698,9 +703,57 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private fun finishZoom() {
         val sw = cam.srcW.toDouble(); val sh = cam.srcH.toDouble(); val w = min(sw, sh * ratio); val h = w / ratio
         frame = RectD((sw - w) / 2, (sh - h) / 2, w, h)      // the photo is now the whole view (in the chosen format)
-        phase = "locked"; lockAt = SystemClock.uptimeMillis()
+        phase = "locked"; lockAt = SystemClock.uptimeMillis(); refAt = 0; refined = false
         lastMatch = "$lastMatch · sensor ${cam.lensNow()}"
-        setMsg(tip.ifEmpty { "Enquadrado. Tira a foto." }, "ok"); ui()
+        setMsg("A afinar a composição…", "ok"); ui()
+        val token = lockAt
+        pv.postDelayed({ if (phase == "locked" && lockAt == token) lifecycleScope.launch { refineShot(token) } }, 250)
+    }
+
+    // ---------- final touch: Gemini looks at the zoomed shot and adjusts the crop itself ----------
+    private var refAt = 0L; private var refFrom: RectD? = null; private var refined = false
+    private suspend fun refineShot(token: Long) {
+        val sw = cam.srcW.toDouble(); val sh = cam.srcH.toDouble()
+        val full = frame ?: return
+        val snap = snapshot(1024) ?: run { setMsg(tip.ifEmpty { "Enquadrado. Tira a foto." }, "ok"); return }
+        var box: RectD? = null; var t2 = ""
+        if (gem.engine() == "gemini" && gem.state == "up") {
+            try {
+                val b64 = withContext(Dispatchers.Default) { val o = ByteArrayOutputStream(); snap.compress(Bitmap.CompressFormat.JPEG, 85, o); Base64.encodeToString(o.toByteArray(), Base64.NO_WRAP) }
+                val j = parseJSON(gem.ask(b64, gem.refinePrompt(snap.width, snap.height, ratio, label.ifEmpty { subj?.name ?: "o motivo" }), gem.model.ifEmpty { set.gmodel }, 9000))
+                val a = j.optJSONArray("shot_box")
+                if (a != null && a.length() >= 4) {
+                    val n = { i: Int -> cl(a.optDouble(i, 0.0) / 1000, 0.0, 1.0) }
+                    val y0 = min(n(0), n(2)); val x0 = min(n(1), n(3)); val y1 = max(n(0), n(2)); val x1 = max(n(1), n(3))
+                    box = RectD(x0 * sw, y0 * sh, (x1 - x0) * sw, (y1 - y0) * sh)
+                }
+                t2 = j.optString("tip", "").take(60)
+            } catch (_: Exception) {}
+        }
+        if (box == null) {
+            // no Gemini: the local engine nudges the crop inside the view (small moves only)
+            box = withContext(Dispatchers.Default) {
+                val (fw, fh) = featureSize(sw, sh)
+                val small = Bitmap.createScaledBitmap(snap, fw, fh, true); val px = IntArray(fw * fh); small.getPixels(px, 0, fw, 0, 0, fw, fh)
+                val F = features(px, fw, fh, null)
+                bestCrop(F, null, ratio, style, CropOpt(listOf(.86, .93, 1.0), fw / 2.0, fh / 2.0, .05))?.let { toFrame(it, F, sw, sh, ratio) }
+            }
+        }
+        if (phase != "locked" || lockAt != token) return
+        val b = box
+        if (b != null) {
+            // exact format, at least 80% of the full view, inside the view
+            val maxW = min(sw, sh * ratio)
+            var w = max(b.w, b.h * ratio).coerceIn(maxW * .8, maxW); var h = w / ratio
+            if (h > sh) { h = sh; w = h * ratio }
+            val cx = b.x + b.w / 2; val cy = b.y + b.h / 2
+            val nf = RectD(cl(cx - w / 2, 0.0, sw - w), cl(cy - h / 2, 0.0, sh - h), w, h)
+            val moved = abs(nf.x - full.x) + abs(nf.y - full.y) + abs(nf.w - full.w)
+            if (moved > maxW * .02) { refFrom = full; refAt = SystemClock.uptimeMillis(); frame = nf; refined = true }
+        }
+        val tipNow = t2.ifEmpty { tip }
+        setMsg(tipNow.ifEmpty { "Pronto. Tira a foto." }, "ok")
+        note = (if (note.isNotEmpty()) "$note · " else "") + (if (refined) "afinado" else "sem ajuste")
     }
 
     private fun resetView() {
@@ -710,7 +763,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         if (mode == "live" && abs(cam.zoom - homeZoom) > .01f) cam.setZoom(homeZoom)
     }
     private fun clearShot() {
-        phase = "idle"; frame = null; subj = null; plan = null; label = ""; cam.trackOn = false; resetView()
+        phase = "idle"; frame = null; subj = null; plan = null; label = ""; cam.trackOn = false; refined = false; refAt = 0; resetView()
         if (mode == "live") setMsg("Aponta e toca em ✦ para encontrar a foto.", "dim")
         ui()
     }
