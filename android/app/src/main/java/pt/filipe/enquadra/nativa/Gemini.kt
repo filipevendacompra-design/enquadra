@@ -83,7 +83,7 @@ class Gemini(private val set: Settings) {
 
     /** lenses: (zoom, frame width as a fraction of the image width) for each real lens the photo can be taken with */
     fun prompt(w: Int, h: Int, ratio: Double, seen: List<String>, lenses: List<Pair<Double, Double>> = emptyList()): String {
-        val lensField = if (lenses.isNotEmpty()) ",\"lens\":" + lenses.joinToString("|") { fmtLens(it.first) } else ""
+        val lensField = if (lenses.isNotEmpty()) ",\"lens\":\"5 if the shot is the 5x size, otherwise 1\"" else ""
         val avoid = if (seen.isNotEmpty()) "\nThe user asked for another option: choose something different from ${seen.takeLast(4).joinToString(", ") { "\"$it\"" }}." else ""
         val p = persona()
         val extra = if (set.extra.isNotEmpty()) "\nThe photographer's own direction (follow it): ${set.extra.take(400)}" else ""
@@ -107,10 +107,10 @@ Coordinates are integers normalized to 0-1000."""
     private fun fmtLens(z: Double) = if (kotlin.math.abs(z - Math.round(z)) < .05) Math.round(z).toString() else "%.1f".format(java.util.Locale.US, z)
     private fun lensText(lenses: List<Pair<Double, Double>>, cover: String): String {
         if (lenses.isEmpty()) return "It covers roughly $cover of the image width."
-        val opts = lenses.joinToString("; ") { (z, f) -> "lens ${fmtLens(z)} = the shot is ${Math.round(f * 100)}% of the image width" }
-        return "The photo will be taken with one of the phone's real lenses, and each lens gives a fixed shot size: $opts. " +
-            "Choose the longest lens in which the subject still fits with a little space around it: a tight telephoto look is usually the most beautiful, and distant subjects call for the longest lens. Use a wider lens only when the subject would not fit. " +
-            "and make shot_box exactly that size."
+        val f5 = Math.round(lenses.first().second * 100)
+        return "The shot can be any size from $f5% to about 90% of the image width ($cover is typical for this style). " +
+            "A small, distant subject is best shot tight at exactly $f5% of the width: the phone then uses its 5x telephoto, the sharpest option for it. " +
+            "Choose the size the photo needs; do not make it bigger just to include more."
     }
 
     /** Second look, after the zoom: Gemini sees the shot itself and makes the final composition adjustment. */

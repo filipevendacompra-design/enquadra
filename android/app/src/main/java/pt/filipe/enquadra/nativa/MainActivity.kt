@@ -58,6 +58,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private val seen = ArrayList<String>()
     private var zoomed = false; private var lockAt = 0L; private var alignedSince = 0L
     private var homeZoom = 1f
+    private val MAIN_MAX = 2.9        // above this the phone switches to the 3x module (soft on the S26 Ultra)
     private val LENS_FILL = .9        // after the zoom the frame fills 90% of the view: room to find it again if the phone moved
     private var roll = 0.0; private var levelValid = false
     private var grid = true; private var levelOn = true
@@ -618,7 +619,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     else if (gem.state == "down" || gem.state == "badkey") note = if (gem.state == "down") "Gemini em baixo." else "Chave do Gemini inválida."
                     else {
                         val b64 = withContext(Dispatchers.Default) { val o = ByteArrayOutputStream(); snap.compress(Bitmap.CompressFormat.JPEG, 85, o); Base64.encodeToString(o.toByteArray(), Base64.NO_WRAP) }
-                        val lensSizes = (if (photo) emptyList() else lensStops()).map { L -> L to (cam.zoom * LENS_FILL / L * min(srcW, srcH * ratio) / srcW) }.filter { it.second < .95 }
+                        val lensSizes = (if (photo) emptyList() else lensStops().filter { it >= 4.9 }).map { L -> L to (cam.zoom * LENS_FILL / L * min(srcW, srcH * ratio) / srcW) }.filter { it.second < .95 }
                         val prompt = gem.prompt(snap.width, snap.height, ratio, seen, lensSizes); var last: Throwable = GErr("g_paused"); var q = 0; var n = 0
                         for (m in gem.modelOrder()) {
                             if (gem.pausedNow(m)) { last = GErr("g_paused"); continue }
@@ -648,19 +649,22 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     // The size of the frame comes from a real lens: the zoom it needs is snapped to 1x, 3x or 5x,
                     // so the photo is taken by that lens at full resolution and never by a digital crop in between.
                     if (cr != null && stops.isNotEmpty()) {
+                        // Lens policy (Filipe's test: the 3x module is soft): automatic shots use the main camera
+                        // zoomed up to 2.9x (still the main sensor) or the 5x periscope; never the 3x.
                         val maxH = min(F.H.toDouble(), F.W / ratio); val s0 = cr.ch / maxH
                         val zRaw = z0 * LENS_FILL / s0
-                        // Gemini picked the lens (it was told each lens's frame size): keep its choice and its framing, only nudge it
-                        val gl = plan0.lens?.let { l -> stops.firstOrNull { abs(it - l) < .05 } }
-                        var L = if (gl != null) fitLens(gl, stops, plan0.subj, z0, srcW, srcH) else pickLens(zRaw, stops, plan0.subj, z0, srcW, srcH)
-                        // without a lens from Gemini, a really small subject (less than half the 5x frame) is shot at 5x
+                        val has5 = stops.any { abs(it - 5) < .01 }
                         val sj0 = plan0.subj
-                        if (L < 4.9 && gl == null && sj0 != null && stops.any { abs(it - 5) < .01 } && fits(sj0, 5.0, z0, srcW, srcH, .45)) L = 5.0
-                        val s = (z0 * LENS_FILL / L).coerceIn(.06, 1.0)
-                        lensTxt = "lente ${fmtZ(L)}" + (if (gl != null) (if (abs(gl - L) > .01) " (gemini ${fmtZ(gl)}, motivo grande)" else " (gemini)") else if (plan0.lens != null) " (gemini pediu ${plan0.lens})" else ""); targetZoom = L
-                        val sh = plan0.shot
-                        if (gl != null && sh != null) cr = bestCrop(F, plan0.subj, ratio, plan0.rule, CropOpt(listOf(s), (sh.x + sh.w / 2) * F.W, (sh.y + sh.h / 2) * F.H, .03)) ?: cr
-                        else if (abs(s / s0 - 1) > .03) cr = bestCrop(F, plan0.subj, ratio, plan0.rule, CropOpt(listOf(s), cr.x0 + cr.cw / 2.0, cr.y0 + cr.ch / 2.0, .06)) ?: cr
+                        val want5 = has5 && (zRaw >= 4.2 || (plan0.lens != null && plan0.lens!! >= 4.5 && zRaw >= 3.2) ||
+                            (sj0 != null && zRaw >= 3.0 && fits(sj0, 5.0, z0, srcW, srcH, .9)))
+                        if (want5) {
+                            val s = (z0 * LENS_FILL / 5.0).coerceIn(.06, 1.0)
+                            if (abs(s / s0 - 1) > .03) cr = bestCrop(F, plan0.subj, ratio, plan0.rule, CropOpt(listOf(s), cr.x0 + cr.cw / 2.0, cr.y0 + cr.ch / 2.0, .04)) ?: cr
+                        }
+                        val sF = cr.ch / maxH; val zF = z0 * LENS_FILL / sF
+                        // the zoom always comes from the final frame, so a small frame always gets its zoom
+                        targetZoom = if (want5 && abs(ln(zF / 5.0)) < .15) 5.0 else min(zF, MAIN_MAX).coerceAtLeast(z0.toDouble())
+                        lensTxt = if (targetZoom >= 4.9) "lente 5×" else if (zF > MAIN_MAX) "principal ${fmtZ(targetZoom)} + recorte" else "principal ${fmtZ(targetZoom)}"
                     }
                     cr?.let { toFrame(it, F, srcW, srcH, ratio) }
                 } ?: throw GErr("no_crop")
