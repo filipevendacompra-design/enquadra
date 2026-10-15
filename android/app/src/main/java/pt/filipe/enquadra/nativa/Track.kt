@@ -73,7 +73,8 @@ class Tracker {
         val TW = 32; val TH = max(12, (TW * rh * g.H / (rw * g.W)).roundToInt())
         anchor = Anchor(sampleGray(g, rx * g.W, ry * g.H, rw * g.W, rh * g.H, TW, TH), TW, TH, rx, ry, rw, rh)
     }
-    fun clearAnchor() { anchor = null; anchorErr = -1.0 }
+    fun clearAnchor() { anchor = null; anchorErr = -1.0; missed = 0 }
+    private var missed = 0
     val hasAnchor get() = anchor != null
 
     /** hi: a grey of the current view (any width). Pulls the tracked position onto where the frame's content really is. */
@@ -83,11 +84,20 @@ class Tracker {
         val cx = hi.W / 2.0; val cy = hi.H / 2.0
         val ew = a.rw * hi.W * S; val eh = a.rh * hi.H * S
         val ex = cx + (a.rx * hi.W - cx) * S + dx * kq; val ey = cy + (a.ry * hi.H - cy) * S + dy * kq
-        val loc = locateNear(a.t, a.TW, a.TH, hi, ex, ey, ew, eh) ?: return
-        anchorErr = loc.err
-        if (loc.err > 24) return
-        val tdx = (loc.x - cx - (a.rx * hi.W - cx) * S) / kq; val tdy = (loc.y - cy - (a.ry * hi.H - cy) * S) / kq
-        dx += (tdx - dx) * .6; dy += (tdy - dy) * .6
+        var loc = locateNear(a.t, a.TW, a.TH, hi, ex, ey, ew, eh)
+        var wide = false
+        if (loc == null || loc.err > 24) {
+            // not where we expected (you looked away and came back, or the tracking slipped): search the whole view
+            missed++
+            if (missed % 2 == 0) { val w = locateWide(a.t, a.TW, a.TH, hi, ew, eh); if (w != null && w.err < 20) { loc = w; wide = true } }
+        }
+        val l = loc ?: return
+        anchorErr = l.err
+        if (l.err > 24) return
+        missed = 0
+        val tdx = (l.x - cx - (a.rx * hi.W - cx) * S) / kq; val tdy = (l.y - cy - (a.ry * hi.H - cy) * S) / kq
+        val k = if (wide) 1.0 else .6          // a re-found frame jumps straight back onto its content
+        dx += (tdx - dx) * k; dy += (tdy - dy) * k
     }
 
     /** prev resampled as if zoomed by s about the centre */
@@ -198,6 +208,19 @@ fun locateNear(ref: FloatArray, TW: Int, TH: Int, cur: Gray, ex: Double, ey: Dou
     val s2 = st / 4
     for (j in -4..4) for (i in -4..4) test(b0.x + i * s2, b0.y + j * s2)
     return best
+}
+
+/** Search the whole view at a known size: coarse grid, then the fine search around the best spot. */
+fun locateWide(ref: FloatArray, TW: Int, TH: Int, cur: Gray, ew: Double, eh: Double): Located? {
+    if (ew >= cur.W || eh >= cur.H) return null
+    var best: Located? = null
+    val st = max(2.0, ew / 5)
+    var y = 0.0
+    while (y + eh <= cur.H) { var x = 0.0
+        while (x + ew <= cur.W) { val e = mad(ref, sampleGray(cur, x, y, ew, eh, TW, TH)); if (best == null || e < best!!.err) best = Located(x, y, ew, eh, e); x += st }
+        y += st }
+    val b = best ?: return null
+    return locateNear(ref, TW, TH, cur, b.x, b.y, ew, eh)
 }
 
 fun locate(ref: FloatArray, TW: Int, TH: Int, cur: Gray, ex: Double, ey: Double, ew: Double, eh: Double): Located? {

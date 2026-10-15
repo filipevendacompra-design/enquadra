@@ -66,4 +66,16 @@ class ComposeTest {
         println("locate ${loc.x} ${loc.y} ${loc.w} ${loc.err}")
         assertEquals(ex + 12, loc.x, 4.0); assertEquals(ey, loc.y, 4.0); assertEquals(160.0, loc.w, 8.0)
     }
+
+    @Test fun wideSearchFindsAFarFrame() {
+        val W = 256; val H = 341
+        fun tex(x: Double, y: Double) = (128 + 60 * kotlin.math.sin(x * .09) * kotlin.math.cos(y * .07) + 40 * kotlin.math.sin((x - y) * .043)).toFloat()
+        val a = Gray(FloatArray(W * H) { tex((it % W).toDouble(), (it / W).toDouble()) }, W, H)
+        val ref = sampleGray(a, 40.0, 50.0, 48.0, 60.0, 32, 40)
+        // the scene moved 150 px right and 200 px down: far beyond the local search
+        val b = Gray(FloatArray(W * H) { tex((it % W - 150).toDouble(), (it / W - 200).toDouble()) }, W, H)
+        val loc = locateWide(ref, 32, 40, b, 48.0, 60.0)!!
+        println("wide ${loc.x} ${loc.y} ${loc.err}")
+        assertEquals(190.0, loc.x, 3.0); assertEquals(250.0, loc.y, 3.0)
+    }
 }
