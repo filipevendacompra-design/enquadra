@@ -29,6 +29,19 @@ fun candidates(F: Features, ratio: Double, sizes: List<Double>, s5: Double?, max
         val m = metrics(F, c.x0, c.y0, c.cw, c.ch, s, null)
         raw.add(Cand(c, st, scoreOf(st, m, null), s5 != null && s == s5))
     }
+    // also every position on a grid, scored by its best rule: more variety for the editor to choose from
+    val maxH = min(F.H.toDouble(), F.W / ratio)
+    for (s in all) {
+        val chh = max(8, (maxH * s).toInt()); val cww = max(8, min(F.W, (chh * ratio).toInt()))
+        for (iy in 0..6) for (ix in 0..6) {
+            val x0 = ((F.W - cww) * ix / 6.0).roundToInt(); val y0 = ((F.H - chh) * iy / 6.0).roundToInt()
+            if (x0 < 0 || y0 < 0 || x0 + cww > F.W || y0 + chh > F.H) continue
+            val m = metrics(F, x0, y0, cww, chh, s, null)
+            var bst = ""; var bsc = -1e9
+            for (st in STYLE_IDS) { val sc = scoreOf(st, m, null); if (sc > bsc) { bsc = sc; bst = st } }
+            raw.add(Cand(Crop(x0, y0, cww, chh), bst, bsc - .15, s5 != null && s == s5))   // slightly behind the optimised crops
+        }
+    }
     raw.sortByDescending { it.score }
     val out = ArrayList<Cand>()
     // a couple of 5x options first, when the 5x lens exists: tight, distant details are where it shines
