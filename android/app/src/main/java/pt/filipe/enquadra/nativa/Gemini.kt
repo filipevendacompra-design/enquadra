@@ -113,6 +113,24 @@ Coordinates are integers normalized to 0-1000."""
             "Choose the size the photo needs; do not make it bigger just to include more."
     }
 
+    /** Curator: Gemini sees n numbered candidate photographs of the scene and picks the most artistic one. */
+    fun curatorPrompt(n: Int, seen: List<String>, teleNumbers: List<Int>): String {
+        val p = persona()
+        val extra = if (set.extra.isNotEmpty()) "\nThe photographer's own taste (follow it): ${set.extra.take(400)}" else ""
+        val avoid = if (seen.isNotEmpty()) "\nThe user asked for another option: do not choose a photo like ${seen.takeLast(4).joinToString(", ") { "\"$it\"" }}." else ""
+        val tele = if (teleNumbers.isNotEmpty()) "\nPhotos ${teleNumbers.joinToString(", ")} would be shot with the 5x telephoto (the sharpest, most compressed look)." else ""
+        return """You are a fine-art photographer and picture editor with a strong personal eye. The image shows $n numbered photographs (1 to $n): different crops of the same scene the user is pointing the camera at. The numbers above each photo are labels, not part of the photos.
+Choose the ONE that is the most beautiful, artistic photograph, as if you were choosing a print for a gallery wall. Judge each one as a finished picture, not as a picture of things:
+- light and mood: warm low light, backlight, rim light, glow, shadows and their shapes, reflections, atmosphere;
+- composition: one clear point of interest placed with intent, lines that lead into the frame, balance and breathing space, a clean background, nothing cut awkwardly at the edges, a straight horizon;
+- graphic strength: shapes, patterns, rhythm, colour and tone contrast, simplicity;
+- feeling or story.
+A photo that only shows a recognisable object (a sign, a car, a building, a lamp) or a busy, cluttered view must lose to one with beautiful light, shape or atmosphere, even if nothing "important" is in it. Prefer the simpler, stronger picture.
+${p.text}$extra$tele$avoid
+Answer with JSON only, fields in this order (think first, then choose):
+{"why":"one sentence in European Portuguese on what makes the winner a beautiful photograph","best":number,"second":number,"idea":"the winning photo in a few words, European Portuguese, about light, shape and mood","subject":"its point of interest, max 4 words, European Portuguese, lowercase","tip":"for someone who knows nothing about photography: where the main things sit in the winning photo, max 9 words, plain places only (ao centro, em cima, em baixo, à esquerda, à direita, no canto de cima à direita…), e.g. 'Sol em cima à direita, mar em baixo'. Never use terços, simetria, diagonal, regra, composição","filter":"one of clean, vivo, quente, claro, suave, pelicula, dourado, cinema, porto, dusk, relic, lofi, pb, noir — matching the mood","border":"one of none, white, ficha, polaroid, galeria, pelicula, desfocado, paper, date"}"""
+    }
+
     /** Second look, after the zoom: Gemini sees the shot itself and makes the final composition adjustment. */
     fun refinePrompt(w: Int, h: Int, ratio: Double, subject: String): String {
         val extra = if (set.extra.isNotEmpty()) "\nThe photographer's own direction (follow it): ${set.extra.take(400)}" else ""

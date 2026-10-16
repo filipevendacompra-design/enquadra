@@ -78,4 +78,12 @@ class ComposeTest {
         println("wide ${loc.x} ${loc.y} ${loc.err}")
         assertEquals(190.0, loc.x, 3.0); assertEquals(250.0, loc.y, 3.0)
     }
+
+    @Test fun candidatesAreDiverse() {
+        val F = features(image(), 160, 120, null)
+        val c = candidates(F, .8, listOf(.3, .42, .58, .78), .18)
+        println("cands ${c.size} " + c.joinToString(" ") { "${it.style}:${it.crop.x0},${it.crop.y0},${it.crop.cw}" + if (it.tele) "T" else "" })
+        assert(c.size in 4..12)
+        assert(c.any { it.tele })
+    }
 }

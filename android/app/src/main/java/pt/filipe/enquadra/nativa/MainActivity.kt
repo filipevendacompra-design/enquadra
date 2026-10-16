@@ -609,67 +609,77 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         cam.trackOn = !photo; ui(); setMsg("A procurar a foto…", "")
         lifecycleScope.launch {
             try {
-                val snap = (if (photo) still?.let { b -> val k = min(1f, 1280f / max(b.width, b.height)); Bitmap.createScaledBitmap(b, max(1, (b.width * k).roundToInt()), max(1, (b.height * k).roundToInt()), true) } else snapshot(1280)) ?: throw GErr("no_frame")
+                val snap = (if (photo) still?.let { b -> val k = min(1f, 1600f / max(b.width, b.height)); Bitmap.createScaledBitmap(b, max(1, (b.width * k).roundToInt()), max(1, (b.height * k).roundToInt()), true) } else snapshot(1600)) ?: throw GErr("no_frame")
                 val srcW = srcWi().toDouble(); val srcH = srcHi().toDouble()
                 val t0 = SystemClock.uptimeMillis()
-                val eng = gem.engine(); var pl: Plan? = null; var who = ""
+                val z0 = cam.zoom; val stops = if (photo) emptyList() else lensStops(); targetZoom = z0.toDouble(); scanZoom = z0.toDouble()
+                val has5 = stops.any { abs(it - 5) < .01 }
+                val look = LOCAL_LOOK[set.persona] ?: LOCAL_LOOK["criativo"]!!
+                // 1. the phone proposes real, well-built crops of the scene
+                val (fw, fh) = featureSize(srcW, srcH)
+                val F = withContext(Dispatchers.Default) {
+                    val small = Bitmap.createScaledBitmap(snap, fw, fh, true); val px = IntArray(fw * fh); small.getPixels(px, 0, fw, 0, 0, fw, fh)
+                    features(px, fw, fh, null)
+                }
+                val s5 = if (has5) (z0 * LENS_FILL / 5.0).takeIf { it in .06..0.9 } else null
+                val sizes = (listOf(.3, .42, .58, .78) + look.scales).map { cl(it, .12, .95) }.distinct()
+                val cands = withContext(Dispatchers.Default) { candidates(F, ratio, sizes, s5) }
+                if (cands.isEmpty()) throw GErr("no_crop")
+                // 2. Gemini, as a picture editor, picks the most artistic one
+                val eng = gem.engine(); var pick = -1; var who = ""
+                var res: org.json.JSONObject? = null
                 if (eng == "gemini") gem.maybeRecheck()
                 if (eng == "gemini") {
                     if (gem.state == "quota") note = "Quota do Gemini esgotada."
                     else if (gem.state == "down" || gem.state == "badkey") note = if (gem.state == "down") "Gemini em baixo." else "Chave do Gemini inválida."
                     else {
-                        val b64 = withContext(Dispatchers.Default) { val o = ByteArrayOutputStream(); snap.compress(Bitmap.CompressFormat.JPEG, 85, o); Base64.encodeToString(o.toByteArray(), Base64.NO_WRAP) }
-                        val lensSizes = (if (photo) emptyList() else lensStops().filter { it >= 4.9 }).map { L -> L to (cam.zoom * LENS_FILL / L * min(srcW, srcH * ratio) / srcW) }.filter { it.second < .95 }
-                        val prompt = gem.prompt(snap.width, snap.height, ratio, seen, lensSizes); var last: Throwable = GErr("g_paused"); var q = 0; var n = 0
+                        setMsg("O Gemini está a escolher a melhor foto…", "")
+                        val b64 = withContext(Dispatchers.Default) {
+                            val sheet = contactSheet(snap, F, cands, ratio)
+                            val o = ByteArrayOutputStream(); sheet.compress(Bitmap.CompressFormat.JPEG, 82, o); Base64.encodeToString(o.toByteArray(), Base64.NO_WRAP) }
+                        val prompt = gem.curatorPrompt(cands.size, seen, cands.mapIndexedNotNull { i, c -> if (c.tele) i + 1 else null })
+                        var last: Throwable = GErr("g_paused"); var q = 0; var n = 0
                         for (m in gem.modelOrder()) {
                             if (gem.pausedNow(m)) { last = GErr("g_paused"); continue }
                             n++
-                            try { pl = fromAI(parseJSON(gem.ask(b64, prompt, m))); who = m.removePrefix("gemini-"); if (gem.state != "up" || gem.model != m) gem.setHealth("up", m, ""); break }
+                            try {
+                                val j = parseJSON(gem.ask(b64, prompt, m, 16000))
+                                val b = j.optInt("best", 0)
+                                if (b < 1 || b > cands.size) throw GErr("bad_json")
+                                res = j; pick = b - 1; who = m.removePrefix("gemini-")
+                                if (gem.state != "up" || gem.model != m) gem.setHealth("up", m, ""); break
+                            }
                             catch (e: GErr) { last = e; if (e.code == "g_429") q++; if (gem.fatalKey(e)) { gem.setHealth("badkey", "", errCopy(e)); break } }
                             catch (e: Exception) { last = e }
                         }
-                        if (pl == null) {
+                        if (pick < 0) {
                             gem.at = System.currentTimeMillis()
                             if (q > 0 && q == n) gem.setQuota(errCopy(last)) else if (gem.state != "badkey") gem.setHealth("down", "", errCopy(last))
                             note = errCopy(last)
                         }
                     }
                 }
-                if (pl == null && note.isNotEmpty() && !note.contains("IA local")) note += " Usei a IA local."
-                val look = LOCAL_LOOK[set.persona] ?: LOCAL_LOOK["criativo"]!!
-                if (pl == null) { pl = Plan(null, null, look.styles[seen.size % look.styles.size], ""); who = "local" }
-                val plan0 = pl!!
-                val (fw, fh) = featureSize(srcW, srcH)
-                val z0 = cam.zoom; val stops = if (photo) emptyList() else lensStops(); targetZoom = z0.toDouble(); scanZoom = z0.toDouble()
+                if (pick < 0) {
+                    if (note.isNotEmpty() && !note.contains("IA local")) note += " Usei a IA local."
+                    pick = seen.size % cands.size; who = "local"          // ✦ again walks through the next candidates
+                }
+                val cand = cands[pick]
+                val j = res
+                val filter = j?.optString("filter")?.takeIf { it in FILTER_IDS }; val border = j?.optString("border")?.takeIf { it in BORDER_IDS }
+                val plan0 = Plan(null, null, cand.style, j?.optString("tip", "")?.take(70) ?: "", filter, border, j?.optString("subject", "")?.lowercase()?.take(36) ?: "")
+                plan0.idea = j?.optString("idea", "")?.take(120) ?: ""
+                val c = toFrame(cand.crop, F, srcW, srcH, ratio)
+                // 3. the lens: the 5x when the chosen photo is the 5x size, else the main camera (up to 2.9x, then a crop)
                 var lensTxt = ""
-                val c = withContext(Dispatchers.Default) {
-                    val small = Bitmap.createScaledBitmap(snap, fw, fh, true); val px = IntArray(fw * fh); small.getPixels(px, 0, fw, 0, 0, fw, fh)
-                    val F = features(px, fw, fh, null)
-                    var cr = planCrop(F, plan0, srcW, srcH, ratio, gem.persona().range, look.scales)
-                    // The size of the frame comes from a real lens: the zoom it needs is snapped to 1x, 3x or 5x,
-                    // so the photo is taken by that lens at full resolution and never by a digital crop in between.
-                    if (cr != null && stops.isNotEmpty()) {
-                        // Lens policy (Filipe's test: the 3x module is soft): automatic shots use the main camera
-                        // zoomed up to 2.9x (still the main sensor) or the 5x periscope; never the 3x.
-                        val maxH = min(F.H.toDouble(), F.W / ratio); val s0 = cr.ch / maxH
-                        val zRaw = z0 * LENS_FILL / s0
-                        val has5 = stops.any { abs(it - 5) < .01 }
-                        val sj0 = plan0.subj
-                        val want5 = has5 && (zRaw >= 4.2 || (plan0.lens != null && plan0.lens!! >= 4.5 && zRaw >= 3.2) ||
-                            (sj0 != null && zRaw >= 3.0 && fits(sj0, 5.0, z0, srcW, srcH, .9)))
-                        if (want5) {
-                            val s = (z0 * LENS_FILL / 5.0).coerceIn(.06, 1.0)
-                            if (abs(s / s0 - 1) > .03) cr = bestCrop(F, plan0.subj, ratio, plan0.rule, CropOpt(listOf(s), cr.x0 + cr.cw / 2.0, cr.y0 + cr.ch / 2.0, .04)) ?: cr
-                        }
-                        val sF = cr.ch / maxH; val zF = z0 * LENS_FILL / sF
-                        // the zoom always comes from the final frame, so a small frame always gets its zoom
-                        targetZoom = if (want5 && abs(ln(zF / 5.0)) < .15) 5.0 else min(zF, MAIN_MAX).coerceAtLeast(z0.toDouble())
-                        lensTxt = if (targetZoom >= 4.9) "lente 5×" else if (zF > MAIN_MAX) "principal ${fmtZ(targetZoom)} + recorte" else "principal ${fmtZ(targetZoom)}"
-                    }
-                    cr?.let { toFrame(it, F, srcW, srcH, ratio) }
-                } ?: throw GErr("no_crop")
+                if (stops.isNotEmpty()) {
+                    val maxH = min(F.H.toDouble(), F.W / ratio); val zF = z0 * LENS_FILL / (cand.crop.ch / maxH)
+                    targetZoom = if (cand.tele || (has5 && abs(ln(zF / 5.0)) < .12)) 5.0 else min(zF, MAIN_MAX).coerceAtLeast(z0.toDouble())
+                    lensTxt = if (targetZoom >= 4.9) "lente 5×" else if (zF > MAIN_MAX) "principal ${fmtZ(targetZoom)} + recorte" else "principal ${fmtZ(targetZoom)}"
+                }
                 val dt = "%.1f".format((SystemClock.uptimeMillis() - t0) / 1000.0)
-                note = (if (plan0.idea.isNotEmpty()) "${plan0.idea}  ·  " else "") + (if (note.isNotEmpty()) "$note  " else "") + "$who · $dt s" + (if (lensTxt.isNotEmpty()) " · $lensTxt" else "")
+                note = (if (plan0.idea.isNotEmpty()) "${plan0.idea}  ·  " else "") + (if (note.isNotEmpty()) "$note  " else "") +
+                    "$who · foto ${pick + 1} de ${cands.size} · $dt s" + (if (lensTxt.isNotEmpty()) " · $lensTxt" else "")
+                j?.optString("why")?.takeIf { it.isNotEmpty() }?.let { lastMatch = "porquê: $it" }
                 if (phase != "scan") return@launch     // cancelled meanwhile
                 plan = plan0; subj = plan0.subj; style = plan0.rule; tip = plan0.tip.ifEmpty { LOCAL_TIP[plan0.rule] ?: "" }
                 label = plan0.name.ifEmpty { plan0.subj?.name ?: "" }

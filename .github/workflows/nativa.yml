@@ -69,7 +69,7 @@ jobs:
             echo "## Testes: ${{ steps.testes.outcome }} · Compilar: ${{ steps.compilar.outcome }}"
             if [ -f test.log ]; then
               echo '```'
-              grep -E "salTot|tercos \[|simetrico \[|minimal \[|aurea \[|diagonal \[|centro \[|moldura \[|subjCenter|m \[0|locate |wide |FAILED|AssertionError|expected" test.log | head -40
+              grep -E "salTot|tercos \[|simetrico \[|minimal \[|aurea \[|diagonal \[|centro \[|moldura \[|subjCenter|m \[0|locate |wide |cands |FAILED|AssertionError|expected" test.log | head -40
               echo '```'
             fi
             if [ "${{ steps.compilar.outcome }}" != "success" ] && [ -f build.log ]; then
@@ -81,7 +81,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           # the same, as annotations (readable through the API)
           if [ -f test.log ]; then
-            echo "::notice title=testes ${{ steps.testes.outcome }}::$(grep -E "salTot|tercos \[|simetrico \[|minimal \[|aurea \[|diagonal \[|centro \[|moldura \[|subjCenter|m \[0|locate |wide |FAILED|AssertionError|expected" test.log | head -40 | note)"
+            echo "::notice title=testes ${{ steps.testes.outcome }}::$(grep -E "salTot|tercos \[|simetrico \[|minimal \[|aurea \[|diagonal \[|centro \[|moldura \[|subjCenter|m \[0|locate |wide |cands |FAILED|AssertionError|expected" test.log | head -40 | note)"
           fi
           if [ -f build.log ]; then
             echo "::notice title=compilar ${{ steps.compilar.outcome }}::$( (grep -E "^e: |error:|What went wrong|Could not" -A3 build.log | head -60; grep -E "^w: " build.log | head -15) | note)"
